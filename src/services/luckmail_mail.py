@@ -23,6 +23,22 @@ _CUSTOM_ACCOUNT_RESERVATIONS: Dict[str, Dict[str, Any]] = {}
 LUCKMAIL_APPEAL_ENABLED = False
 
 
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off", ""}:
+            return False
+    return bool(value)
+
+
 def _load_luckmail_client_class():
     """
     兼容两种来源：
@@ -67,6 +83,7 @@ class LuckMailService(BaseEmailService):
             "project_code": "openai",
             "email_type": "ms_graph",
             "preferred_domain": "",
+            "prefer_existing_account_list": True,
             # purchase: 购买邮箱 + token 拉码（可多次）
             # order: 创建接码订单 + 订单拉码（通常一次）
             "inbox_mode": "purchase",
@@ -89,7 +106,14 @@ class LuckMailService(BaseEmailService):
         self.config["email_type"] = str(self.config.get("email_type") or "ms_graph").strip()
         self.config["preferred_domain"] = str(self.config.get("preferred_domain") or "").strip().lstrip("@")
         self.config["inbox_mode"] = self._normalize_inbox_mode(self.config.get("inbox_mode"))
-        self.config["reuse_existing_purchases"] = bool(self.config.get("reuse_existing_purchases", True))
+        self.config["prefer_existing_account_list"] = _coerce_bool(
+            self.config.get("prefer_existing_account_list", True),
+            True,
+        )
+        self.config["reuse_existing_purchases"] = _coerce_bool(
+            self.config.get("reuse_existing_purchases", True),
+            True,
+        )
         self.config["purchase_scan_pages"] = max(int(self.config.get("purchase_scan_pages") or 5), 1)
         self.config["purchase_scan_page_size"] = max(int(self.config.get("purchase_scan_page_size") or 100), 1)
         self.config["poll_interval"] = float(self.config.get("poll_interval") or 3.0)
@@ -1047,11 +1071,16 @@ class LuckMailService(BaseEmailService):
 
     def create_email(self, config: Dict[str, Any] = None) -> Dict[str, Any]:
         request_config = config or {}
-        custom_account_info = self._pick_custom_account_inbox()
-        if custom_account_info:
-            self._cache_order(custom_account_info)
-            self.update_status(True)
-            return custom_account_info
+        prefer_existing_account_list = _coerce_bool(
+            request_config.get("prefer_existing_account_list"),
+            self.config.get("prefer_existing_account_list", True),
+        )
+        if prefer_existing_account_list:
+            custom_account_info = self._pick_custom_account_inbox()
+            if custom_account_info:
+                self._cache_order(custom_account_info)
+                self.update_status(True)
+                return custom_account_info
 
         project_code = str(request_config.get("project_code") or self.config["project_code"]).strip()
         email_type = str(request_config.get("email_type") or self.config["email_type"]).strip()
@@ -1255,6 +1284,7 @@ class LuckMailService(BaseEmailService):
             "project_code": self.config.get("project_code"),
             "email_type": self.config.get("email_type"),
             "preferred_domain": self.config.get("preferred_domain"),
+            "prefer_existing_account_list": self.config.get("prefer_existing_account_list", True),
             "inbox_mode": self.config.get("inbox_mode"),
             "account_list_total": len(account_list),
             "account_list_unused": sum(1 for item in account_list if not item.get("used")),

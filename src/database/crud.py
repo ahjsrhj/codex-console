@@ -56,6 +56,8 @@ def create_account(
     extra_data: Optional[Dict[str, Any]] = None,
     status: Optional[str] = None,
     source: Optional[str] = None,
+    registered_at: Optional['datetime'] = None,
+    last_refresh: Optional['datetime'] = None,
     account_label: Optional[str] = None,
     role_tag: Optional[str] = None,
     biz_tag: Optional[str] = None,
@@ -92,6 +94,8 @@ def create_account(
         extra_data=extra_data or {},
         status=status or 'active',
         source=source or 'register',
+        registered_at=registered_at or utcnow_naive(),
+        last_refresh=last_refresh,
         account_label=normalized_account_label,
         role_tag=normalized_role_tag,
         biz_tag=(str(biz_tag).strip() or None) if biz_tag is not None else None,
@@ -99,7 +103,6 @@ def create_account(
         pool_state_manual=normalized_pool_state_manual,
         priority=int(priority) if priority is not None else 50,
         last_used_at=last_used_at,
-        registered_at=utcnow_naive()
     )
     db.add(db_account)
     db.commit()
@@ -148,11 +151,11 @@ def get_accounts(
 
 def update_account(
     db: Session,
-    account_id: int,
+    db_account_id: int,
     **kwargs
 ) -> Optional[Account]:
     """更新账户信息"""
-    db_account = get_account_by_id(db, account_id)
+    db_account = get_account_by_id(db, db_account_id)
     if not db_account:
         return None
 

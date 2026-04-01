@@ -243,6 +243,63 @@
         .auto-quick-refresh-log-item.level-info .log-level {
             color: var(--primary-color);
         }
+        .account-import-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .account-import-note {
+            font-size: 0.9rem;
+            line-height: 1.6;
+            color: var(--text-secondary);
+        }
+        .account-import-dropzone {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            min-height: 156px;
+            padding: 20px;
+            border: 1.5px dashed var(--border);
+            border-radius: 12px;
+            background: var(--surface-hover);
+            text-align: center;
+            cursor: pointer;
+            transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+        }
+        .account-import-dropzone:hover,
+        .account-import-dropzone:focus-visible,
+        .account-import-dropzone.is-dragover {
+            border-color: var(--primary-color);
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.12);
+            transform: translateY(-1px);
+            outline: none;
+        }
+        .account-import-dropzone .drop-icon {
+            font-size: 1.8rem;
+            line-height: 1;
+        }
+        .account-import-dropzone .drop-title {
+            font-size: 0.98rem;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+        .account-import-dropzone .drop-hint {
+            font-size: 0.84rem;
+            color: var(--text-muted);
+        }
+        .account-import-file {
+            min-height: 20px;
+            font-size: 0.84rem;
+            color: var(--text-secondary);
+        }
+        .account-import-textarea {
+            width: 100%;
+            min-height: 180px;
+            font-family: var(--font-mono);
+            resize: vertical;
+        }
     </style>
 </head>
 <body>
@@ -364,6 +421,9 @@
                         <button class="btn btn-danger" id="batch-delete-btn" disabled>
                             🗑️ 批量删除
                         </button>
+                        <button class="btn btn-secondary" id="import-btn" title="导入 sub2api 导出的账号信息">
+                            📤 导入账号
+                        </button>
                         <div class="dropdown">
                             <button class="btn btn-primary" id="export-btn">
                                 📥 导出
@@ -440,6 +500,43 @@
             </div>
             <div class="modal-body" id="modal-body">
                 <!-- 动态加载 -->
+            </div>
+        </div>
+    </div>
+
+    <!-- 账号导入模态框 -->
+    <div class="modal" id="import-modal">
+        <div class="modal-content" style="max-width: 640px;">
+            <div class="modal-header">
+                <h3>📤 导入账号</h3>
+                <button class="modal-close" id="close-import-modal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="account-import-panel">
+                    <div class="account-import-note">
+                        支持拖入或选择 <code>sub2api</code> 导出的账号 JSON 文件，也兼容直接粘贴账号数组或带 <code>accounts</code> 字段的 JSON。
+                    </div>
+                    <input type="file" id="import-file-input" accept=".json,application/json" hidden>
+                    <div class="account-import-dropzone" id="import-dropzone" tabindex="0" role="button" aria-label="拖入或选择导入文件">
+                        <div class="drop-icon">📎</div>
+                        <div class="drop-title">拖入 sub2api 导出的 JSON 文件</div>
+                        <div class="drop-hint">或点击这里选择文件</div>
+                    </div>
+                    <div class="account-import-file" id="import-file-summary">
+                        尚未选择文件，提交时也可以直接使用下方粘贴的 JSON。
+                    </div>
+                    <div class="form-group">
+                        <label for="import-json">粘贴 JSON（可选，优先于已选择文件）</label>
+                        <textarea id="import-json" class="form-input account-import-textarea" placeholder='{"accounts":[{"credentials":{"email":"a@example.com"}}]}'></textarea>
+                    </div>
+                    <label style="display:flex;align-items:center;gap:8px;">
+                        <input id="import-overwrite" type="checkbox"> 覆盖同邮箱已有账号
+                    </label>
+                </div>
+            </div>
+            <div class="modal-footer" style="padding: 12px 20px; border-top: 1px solid var(--border); display: flex; gap: 8px; justify-content: flex-end;">
+                <button class="btn btn-secondary" id="cancel-import-modal-btn">取消</button>
+                <button class="btn btn-primary" id="submit-import-btn">开始导入</button>
             </div>
         </div>
     </div>
@@ -564,7 +661,6 @@
     {% include "partials/site_footer.html" %}
 </body>
 </html>
-
 
 
 

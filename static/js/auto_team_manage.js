@@ -10,6 +10,23 @@
         banned: '已封禁',
         failed: '失败',
     };
+    const IMPORT_STATUS_LABEL = {
+        pending: '处理中',
+        created: '创建成功',
+        updated: '更新成功',
+        skipped: '已跳过',
+        failed: '失败',
+    };
+    const IMPORT_STAGE_LABEL = {
+        request_parse: '请求解析',
+        payload_validate: '字段校验',
+        token_parse: 'Token 解析',
+        normalize_fields: '字段归一化',
+        lookup_existing: '查重',
+        update_account: '更新账号',
+        create_account: '创建账号',
+        subscription_sync: '订阅同步',
+    };
 
     const COLUMN_KEYS = ['members', 'plan', 'expires'];
     const HIDDEN_COLS_KEY = 'auto_team_manage_hidden_cols_v1';
@@ -42,6 +59,16 @@
     function statusText(status) {
         const key = String(status || '').toLowerCase();
         return STATUS_LABEL[key] || key || '未知';
+    }
+
+    function importStatusText(status) {
+        const key = String(status || '').toLowerCase();
+        return IMPORT_STATUS_LABEL[key] || key || '未知';
+    }
+
+    function importStageText(stage) {
+        const key = String(stage || '').toLowerCase();
+        return IMPORT_STAGE_LABEL[key] || key || '未知阶段';
     }
 
     const BLOCKED_INVITER_STATUSES = new Set([
@@ -159,6 +186,7 @@
                 teamImportSinglePanel: document.getElementById('teamImportSinglePanel'),
                 teamImportBatchPanel: document.getElementById('teamImportBatchPanel'),
                 teamImportModalHint: document.getElementById('teamImportModalHint'),
+                teamImportLog: document.getElementById('teamImportLog'),
                 teamImportAccessToken: document.getElementById('teamImportAccessToken'),
                 teamImportRefreshToken: document.getElementById('teamImportRefreshToken'),
                 teamImportSessionToken: document.getElementById('teamImportSessionToken'),
@@ -796,6 +824,96 @@
             this.els.teamImportModalHint.style.color = isError ? 'var(--danger-color)' : '';
         }
 
+        setImportLog(text) {
+            if (!this.els.teamImportLog) return;
+            this.els.teamImportLog.textContent = text || '等待开始...';
+            this.els.teamImportLog.scrollTop = this.els.teamImportLog.scrollHeight;
+        }
+
+        renderImportLocalLog(logs) {
+            if (!Array.isArray(logs) || !logs.length) {
+                this.setImportLog('等待开始...');
+                return;
+            }
+            const lines = ['本地流程：', ...logs.map((line) => `- ${line}`)];
+            this.setImportLog(lines.join('\n'));
+        }
+
+        renderImportResponseLog(data, localLogs = []) {
+            const lines = [];
+            if (Array.isArray(localLogs) && localLogs.length) {
+                lines.push('本地流程：');
+                localLogs.forEach((line) => lines.push(`- ${line}`));
+                lines.push('');
+            }
+
+            lines.push(
+                `服务端汇总：总计 ${data?.total || 0}，创建 ${data?.created || 0}，更新 ${data?.updated || 0}，跳过 ${data?.skipped || 0}，失败 ${data?.failed || 0}`
+            );
+
+            const details = Array.isArray(data?.details) ? data.details : [];
+            if (!details.length) {
+                const errors = Array.isArray(data?.errors) ? data.errors : [];
+                if (errors.length) {
+                    lines.push('');
+                    lines.push('服务端错误：');
+                    errors.forEach((item) => {
+                        lines.push(
+                            `- 第 ${item?.index || '-'} 条 | ${item?.email || '-'} | ${importStageText(item?.stage)} | ${item?.error || '-'}`
+                        );
+                    });
+                }
+                this.setImportLog(lines.join('\n'));
+                return;
+            }
+
+            lines.push('');
+            lines.push('逐条导入日志：');
+            details.forEach((detail) => {
+                lines.push(`[${detail?.index || '-'}] ${detail?.email || '-'} | ${importStatusText(detail?.status)}`);
+                const steps = Array.isArray(detail?.steps) ? detail.steps : [];
+                if (!steps.length) {
+                    lines.push('  1. 无阶段日志');
+                } else {
+                    steps.forEach((step, idx) => {
+                        const tag = step?.level === 'error' ? '失败' : (step?.level === 'warn' ? '提示' : '完成');
+                        lines.push(`  ${idx + 1}. ${importStageText(step?.stage)} [${tag}] ${step?.message || '-'}`);
+                    });
+                }
+                if (detail?.failed_stage) {
+                    lines.push(`  失败阶段：${importStageText(detail.failed_stage)}`);
+                }
+                if (detail?.error) {
+                    lines.push(`  错误信息：${detail.error}`);
+                }
+                lines.push('');
+            });
+
+            this.setImportLog(lines.join('\n').trim());
+        }
+
+        renderImportErrorLog(localLogs, error) {
+            const lines = [];
+            if (Array.isArray(localLogs) && localLogs.length) {
+                lines.push('本地流程：');
+                localLogs.forEach((line) => lines.push(`- ${line}`));
+                lines.push('');
+            }
+
+            lines.push(`导入失败：${safeError(error)}`);
+            const serverErrors = Array.isArray(error?.data?.errors) ? error.data.errors : [];
+            if (serverErrors.length) {
+                lines.push('');
+                lines.push('服务端错误：');
+                serverErrors.forEach((item) => {
+                    lines.push(
+                        `- 第 ${item?.index || '-'} 条 | ${item?.email || '-'} | ${importStageText(item?.stage)} | ${item?.error || '-'}`
+                    );
+                });
+            }
+            this.setImportLog(lines.join('\n'));
+        }
+
         setImportMode(mode) {
             const next = mode === 'batch' ? 'batch' : 'single';
             this.teamImportMode = next;
@@ -808,6 +926,7 @@
         openImportModal() {
             this.setImportMode('single');
             this.setImportHint('填写 Team Token 后点击导入。');
+            this.setImportLog('等待开始...');
             this.els.teamImportModal?.classList.add('show');
         }
 
@@ -879,10 +998,13 @@
         }
 
         async submitTeamImport() {
+            const localLogs = [];
             try {
                 this.setImportHint('导入中...');
+                this.setImportLog('导入中...');
                 loading.show(this.els.btnSubmitTeamImport, '导入中...');
                 let rawItems = [];
+                localLogs.push(`开始导入，模式：${this.teamImportMode === 'batch' ? '批量导入' : '单个导入'}`);
 
                 if (this.teamImportMode === 'single') {
                     rawItems = [{
@@ -893,31 +1015,45 @@
                         email: this.els.teamImportEmail?.value,
                         account_id: this.els.teamImportAccountId?.value,
                     }];
+                    localLogs.push('已收集单条导入表单数据');
                 } else {
+                    localLogs.push('开始解析批量导入文本');
                     rawItems = this.parseBatchImportText(this.els.teamImportBatchText?.value || '');
+                    localLogs.push(`批量文本解析完成，共 ${rawItems.length} 条`);
                 }
 
+                let normalizedCount = 0;
                 const accounts = rawItems.map((item, idx) => {
                     try {
-                        return this.buildImportItemFromRaw(item || {});
+                        const account = this.buildImportItemFromRaw(item || {});
+                        normalizedCount += 1;
+                        return account;
                     } catch (e) {
+                        localLogs.push(`第 ${idx + 1} 条本地预处理失败：${e.message || e}`);
                         throw new Error(`第 ${idx + 1} 条: ${e.message || e}`);
                     }
                 });
+                localLogs.push(`本地预处理完成，共 ${normalizedCount} 条`);
+                localLogs.push('准备提交到 /accounts/import');
+                this.renderImportLocalLog(localLogs);
 
                 const data = await api.post('/accounts/import', {
                     accounts,
                     overwrite: true,
                 });
                 const msg = `完成：创建 ${data.created || 0}，更新 ${data.updated || 0}，跳过 ${data.skipped || 0}，失败 ${data.failed || 0}`;
-                this.setImportHint(msg, false);
-                toast.success('导入完成');
-                await this.loadConsole(false);
-                if (!Number(data.failed || 0)) {
-                    this.closeImportModal();
+                this.renderImportResponseLog(data, localLogs);
+                this.setImportHint(`${msg}，可查看下方导入日志。`, Number(data.failed || 0) > 0);
+                if (Number(data.failed || 0) > 0) {
+                    toast.warning(msg);
+                } else {
+                    toast.success(msg);
                 }
+                await this.loadConsole(false, true);
             } catch (error) {
                 const msg = safeError(error);
+                localLogs.push(`流程中断：${msg}`);
+                this.renderImportErrorLog(localLogs, error);
                 this.setImportHint(msg, true);
                 toast.error(msg);
             } finally {

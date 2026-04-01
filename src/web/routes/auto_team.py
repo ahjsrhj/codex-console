@@ -534,7 +534,28 @@ def _resolve_account_role_tag(account: Account) -> str:
     role_raw = str(getattr(account, "role_tag", "") or "").strip()
     if role_raw:
         return normalize_role_tag(role_raw)
-    return account_label_to_role_tag(getattr(account, "account_label", None))
+    normalized_from_label = account_label_to_role_tag(getattr(account, "account_label", None))
+    if normalized_from_label != RoleTag.NONE.value:
+        return normalized_from_label
+
+    # 兼容旧的 team_import 历史数据：此前导入成功但未落库 role_tag/account_label。
+    source = str(getattr(account, "source", "") or "").strip().lower()
+    if source == "team_import":
+        extra = getattr(account, "extra_data", None)
+        imported_from = ""
+        if isinstance(extra, dict):
+            imported_from = str(extra.get("imported_from") or "").strip().lower()
+        if imported_from == "team_manage_modal" and _infer_account_plan(account) == "team":
+            has_workspace = bool(str(_resolve_workspace_id(account) or "").strip())
+            can_auth = bool(
+                str(getattr(account, "access_token", "") or "").strip()
+                or str(getattr(account, "refresh_token", "") or "").strip()
+                or str(getattr(account, "session_token", "") or "").strip()
+            )
+            if has_workspace and can_auth:
+                return RoleTag.PARENT.value
+
+    return normalized_from_label
 
 
 def _set_account_role_tag(account: Account, role_tag: str) -> str:
@@ -1914,6 +1935,18 @@ def _team_api_request(
                 raw = (response.text or "").strip()
             except Exception:
                 raw = ""
+        if not body and _looks_like_html_document(raw):
+            logger.warning(
+                "team_api_request returned html page: method=%s workspace=%s path=%s status=%s",
+                method,
+                workspace_id,
+                path,
+                response.status_code,
+            )
+            # 常见于 token 失效、会话跳转登录页、代理/网关返回网页。
+            # 对 2xx HTML 兜底按鉴权失败处理，触发上层 refresh 重试。
+            if 200 <= int(response.status_code or 0) < 300:
+                return 401, {}, raw
         return response.status_code, body, raw
     except Exception as exc:
         logger.warning(
@@ -2506,8 +2539,26 @@ def _extract_error_text(status_code: int, body: Dict[str, Any], raw_text: str) -
     if message:
         return str(message)
     if raw_text:
+        if _looks_like_html_document(raw_text):
+            if status_code in (401, 403):
+                return f"Team 接口返回 HTML 登录页/网关页 (HTTP {status_code})，疑似 access_token 已失效或当前代理返回了网页。"
+            return f"Team 接口返回 HTML 页面 (HTTP {status_code})，不是预期的 JSON 数据，可能是会话失效、workspace 无权限或代理拦截。"
         return raw_text[:500]
     return f"邀请失败: HTTP {status_code}"
+
+
+def _looks_like_html_document(raw_text: str) -> bool:
+    text = str(raw_text or "").lstrip().lower()
+    if not text:
+        return False
+    markers = (
+        "<!doctype html",
+        "<html",
+        "<head",
+        "<meta ",
+        "<body",
+    )
+    return any(text.startswith(marker) for marker in markers)
 
 
 def _is_workspace_context_error(error_text: str) -> bool:
@@ -2613,7 +2664,7 @@ def _retry_with_refresh_on_auth_error(
     if not access_token:
         return status_code, body, raw, used_access_token
     try:
-        return (*executor(access_token), access_token)
+        return executor(access_token)
     except Exception as exc:
         logger.warning("team executor failed after refresh: account=%s err=%s", account.id, exc)
         return 599, {"detail": str(exc)}, str(exc), access_token

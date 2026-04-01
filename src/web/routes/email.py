@@ -108,6 +108,22 @@ def _is_valid_email_address(value: str) -> bool:
     return bool(local_part and domain and "." in domain)
 
 
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off", ""}:
+            return False
+    return bool(value)
+
+
 def _normalize_luckmail_account_list(entries: Any) -> List[Dict[str, Any]]:
     if not isinstance(entries, list):
         return []
@@ -223,6 +239,11 @@ def normalize_email_service_config(service_type: str, config: Optional[Dict[str,
 
     if service_type == "luckmail" and normalized.get("domain") and not normalized.get("preferred_domain"):
         normalized["preferred_domain"] = normalized.pop("domain")
+    if service_type == "luckmail" and "prefer_existing_account_list" in normalized:
+        normalized["prefer_existing_account_list"] = _coerce_bool(
+            normalized.get("prefer_existing_account_list"),
+            True,
+        )
 
     return normalized
 
@@ -514,6 +535,7 @@ async def get_service_types():
                     {"name": "project_code", "label": "项目编码", "required": False, "default": "openai"},
                     {"name": "email_type", "label": "邮箱类型", "required": False, "default": "ms_graph"},
                     {"name": "preferred_domain", "label": "优先域名", "required": False, "placeholder": "outlook.com"},
+                    {"name": "prefer_existing_account_list", "label": "优先使用现有账号", "required": False, "default": True},
                     {"name": "account_list_text", "label": "现有账号列表", "required": False, "placeholder": "email@example.com----tok_xxx"},
                     {"name": "poll_interval", "label": "轮询间隔(秒)", "required": False, "default": 3.0},
                 ]

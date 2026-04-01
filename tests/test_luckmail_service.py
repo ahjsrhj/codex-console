@@ -104,6 +104,40 @@ def test_create_email_falls_back_to_purchase_when_custom_pool_is_exhausted():
     assert email_info["source"] == "new_purchase"
 
 
+def test_create_email_skips_custom_account_pool_when_prefer_existing_account_list_disabled():
+    service = _build_service({
+        "prefer_existing_account_list": False,
+        "account_list": [
+            {"email": "pool1@example.com", "token": "tok_pool1", "used": False},
+        ],
+    })
+
+    def fake_purchase(project_code, email_type, preferred_domain):
+        return {
+            "id": "tok_fallback",
+            "service_id": "tok_fallback",
+            "order_no": "",
+            "email": "fallback@example.com",
+            "token": "tok_fallback",
+            "purchase_id": "purchase-1",
+            "inbox_mode": "purchase",
+            "project_code": project_code,
+            "email_type": email_type,
+            "preferred_domain": preferred_domain,
+            "expired_at": "",
+            "created_at": 0,
+            "source": "new_purchase",
+        }
+
+    service._create_purchase_inbox = fake_purchase
+
+    email_info = service.create_email()
+
+    assert email_info["email"] == "fallback@example.com"
+    assert email_info["source"] == "new_purchase"
+    assert service.config["account_list"][0]["used"] is False
+
+
 def test_mark_registration_outcome_marks_custom_account_used_in_database(monkeypatch, tmp_path):
     manager = _build_manager("luckmail_service_mark_used.db")
 

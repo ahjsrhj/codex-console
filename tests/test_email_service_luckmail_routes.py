@@ -33,6 +33,7 @@ def test_email_service_types_include_luckmail_account_list():
 
     assert luckmail_type["label"] == "LuckMail"
     field_names = [field["name"] for field in luckmail_type["config_fields"]]
+    assert "prefer_existing_account_list" in field_names
     assert "account_list_text" in field_names
 
 
@@ -78,6 +79,7 @@ def test_create_luckmail_service_parses_account_list_and_list_hides_tokens(monke
                 "api_key": "lm_test_key",
                 "project_code": "openai",
                 "email_type": "ms_graph",
+                "prefer_existing_account_list": False,
                 "account_list_text": "pool1@example.com----tok_pool1\npool2@example.com----tok_pool2",
             },
             enabled=True,
@@ -88,6 +90,7 @@ def test_create_luckmail_service_parses_account_list_and_list_hides_tokens(monke
     with manager.session_scope() as session:
         service = session.query(EmailService).filter(EmailService.id == created.id).first()
         assert service is not None
+        assert service.config["prefer_existing_account_list"] is False
         assert service.config["account_list"] == [
             {
                 "email": "pool1@example.com",
@@ -110,12 +113,14 @@ def test_create_luckmail_service_parses_account_list_and_list_hides_tokens(monke
 
     listed = asyncio.run(email_routes.list_email_services(service_type="luckmail", enabled_only=False))
     assert listed.total == 1
+    assert listed.services[0].config["prefer_existing_account_list"] is False
     assert listed.services[0].config["has_account_list"] is True
     assert listed.services[0].config["account_list_total"] == 2
     assert listed.services[0].config["account_list_unused"] == 2
     assert "account_list" not in listed.services[0].config
 
     full = asyncio.run(email_routes.get_email_service_full(created.id))
+    assert full["config"]["prefer_existing_account_list"] is False
     assert full["config"]["account_list_text"] == "pool1@example.com----tok_pool1\npool2@example.com----tok_pool2"
     assert full["config"]["account_list"][0]["token"] == "tok_pool1"
 

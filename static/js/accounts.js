@@ -21,6 +21,10 @@ let autoQuickRefreshSettings = null;
 let autoQuickRefreshFormDirty = false;
 let isTaskPausing = false;
 let isTaskResuming = false;
+let isImportSubmitting = false;
+let pendingImportAccounts = [];
+let pendingImportSourceLabel = '';
+let importDropzoneDepth = 0;
 let pendingAccountListRefresh = null;
 let pendingAccountStatsRefresh = null;
 const TASK_TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
@@ -244,6 +248,7 @@ const elements = {
     batchPauseBtn: document.getElementById('batch-pause-btn'),
     batchResumeBtn: document.getElementById('batch-resume-btn'),
     batchDeleteBtn: document.getElementById('batch-delete-btn'),
+    importBtn: document.getElementById('import-btn'),
     exportBtn: document.getElementById('export-btn'),
     exportMenu: document.getElementById('export-menu'),
     selectAll: document.getElementById('select-all'),
@@ -253,6 +258,15 @@ const elements = {
     detailModal: document.getElementById('detail-modal'),
     modalBody: document.getElementById('modal-body'),
     closeModal: document.getElementById('close-modal'),
+    importModal: document.getElementById('import-modal'),
+    closeImportModalBtn: document.getElementById('close-import-modal'),
+    cancelImportModalBtn: document.getElementById('cancel-import-modal-btn'),
+    submitImportBtn: document.getElementById('submit-import-btn'),
+    importFileInput: document.getElementById('import-file-input'),
+    importDropzone: document.getElementById('import-dropzone'),
+    importFileSummary: document.getElementById('import-file-summary'),
+    importJson: document.getElementById('import-json'),
+    importOverwrite: document.getElementById('import-overwrite'),
     autoQuickRefreshModal: document.getElementById('auto-quick-refresh-modal'),
     autoQuickRefreshEnabled: document.getElementById('auto-quick-refresh-enabled'),
     autoQuickRefreshInterval: document.getElementById('auto-quick-refresh-interval'),
@@ -375,6 +389,8 @@ function initEventListeners() {
         }
     });
 
+    elements.importBtn?.addEventListener('click', openImportModal);
+
     // 导出
     elements.exportBtn.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -397,6 +413,61 @@ function initEventListeners() {
         if (e.target === elements.detailModal) {
             elements.detailModal.classList.remove('active');
         }
+    });
+
+    elements.closeImportModalBtn?.addEventListener('click', closeImportModal);
+    elements.cancelImportModalBtn?.addEventListener('click', closeImportModal);
+    elements.submitImportBtn?.addEventListener('click', submitImportAccounts);
+    elements.importModal?.addEventListener('click', (e) => {
+        if (e.target === elements.importModal) {
+            closeImportModal();
+        }
+    });
+    elements.importDropzone?.addEventListener('click', () => {
+        elements.importFileInput?.click();
+    });
+    elements.importDropzone?.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            elements.importFileInput?.click();
+        }
+    });
+    elements.importFileInput?.addEventListener('change', async (e) => {
+        const [file] = Array.from(e.target?.files || []);
+        if (!file) return;
+        await loadImportAccountsFromFile(file);
+    });
+    elements.importJson?.addEventListener('input', () => {
+        updateImportFileSummary();
+    });
+
+    elements.importDropzone?.addEventListener('dragenter', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        importDropzoneDepth += 1;
+        setImportDropzoneActive(true);
+    });
+    elements.importDropzone?.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setImportDropzoneActive(true);
+    });
+    elements.importDropzone?.addEventListener('dragleave', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        importDropzoneDepth = Math.max(0, importDropzoneDepth - 1);
+        if (importDropzoneDepth === 0) {
+            setImportDropzoneActive(false);
+        }
+    });
+    elements.importDropzone?.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        importDropzoneDepth = 0;
+        setImportDropzoneActive(false);
+        const [file] = Array.from(e.dataTransfer?.files || []);
+        if (!file) return;
+        await loadImportAccountsFromFile(file);
     });
 
     elements.closeAutoQuickRefreshModalBtn?.addEventListener('click', closeAutoQuickRefreshModal);
@@ -1712,6 +1783,178 @@ async function handleBatchDelete() {
         loadAccounts();
     } catch (error) {
         toast.error('删除失败: ' + error.message);
+    }
+}
+
+function setImportDropzoneActive(active) {
+    elements.importDropzone?.classList.toggle('is-dragover', Boolean(active));
+}
+
+function updateImportFileSummary() {
+    if (!elements.importFileSummary) return;
+    const inputText = (elements.importJson?.value || '').trim();
+    if (inputText) {
+        elements.importFileSummary.textContent = '已检测到粘贴的 JSON，提交时会优先使用文本框内容。';
+        return;
+    }
+    if (pendingImportAccounts.length > 0) {
+        elements.importFileSummary.textContent = pendingImportSourceLabel || `已载入 ${pendingImportAccounts.length} 条账号`;
+        return;
+    }
+    elements.importFileSummary.textContent = '尚未选择文件，提交时也可以直接使用下方粘贴的 JSON。';
+}
+
+function resetImportState() {
+    pendingImportAccounts = [];
+    pendingImportSourceLabel = '';
+    importDropzoneDepth = 0;
+    if (elements.importFileInput) {
+        elements.importFileInput.value = '';
+    }
+    setImportDropzoneActive(false);
+    updateImportFileSummary();
+}
+
+function openImportModal() {
+    if (!elements.importModal) return;
+    resetImportState();
+    if (elements.importJson) {
+        elements.importJson.value = '';
+    }
+    if (elements.importOverwrite) {
+        elements.importOverwrite.checked = false;
+    }
+    elements.importModal.classList.add('active');
+    updateImportFileSummary();
+}
+
+function closeImportModal(options = {}) {
+    if (isImportSubmitting && options.force !== true) return;
+    elements.importModal?.classList.remove('active');
+    if (elements.importJson) {
+        elements.importJson.value = '';
+    }
+    if (elements.importOverwrite) {
+        elements.importOverwrite.checked = false;
+    }
+    resetImportState();
+}
+
+function extractImportAccounts(parsed) {
+    const accounts = Array.isArray(parsed)
+        ? parsed
+        : (Array.isArray(parsed?.accounts) ? parsed.accounts : []);
+    if (!accounts.length) {
+        throw new Error('JSON 必须是非空数组，或包含 accounts 数组');
+    }
+    return accounts;
+}
+
+function buildImportSourceLabel(parsed, accounts, sourceName) {
+    const isSub2ApiPayload = Array.isArray(parsed?.accounts)
+        && accounts.some((item) => item && typeof item === 'object' && item.credentials && typeof item.credentials === 'object');
+    if (isSub2ApiPayload) {
+        return `${sourceName}，检测到 Sub2API 导出，共 ${accounts.length} 条账号`;
+    }
+    return `${sourceName}，共 ${accounts.length} 条账号`;
+}
+
+function parseImportJsonText(text, sourceName = 'JSON 内容') {
+    let parsed;
+    try {
+        parsed = JSON.parse(text);
+    } catch (error) {
+        throw new Error(`JSON 解析失败: ${error.message || '格式错误'}`);
+    }
+    const accounts = extractImportAccounts(parsed);
+    return {
+        parsed,
+        accounts,
+        sourceLabel: buildImportSourceLabel(parsed, accounts, sourceName),
+    };
+}
+
+async function loadImportAccountsFromFile(file) {
+    try {
+        const text = await file.text();
+        const { accounts, sourceLabel } = parseImportJsonText(text, `已载入 ${file.name}`);
+        pendingImportAccounts = accounts;
+        pendingImportSourceLabel = sourceLabel;
+        updateImportFileSummary();
+        toast.success(sourceLabel);
+    } catch (error) {
+        pendingImportAccounts = [];
+        pendingImportSourceLabel = '';
+        updateImportFileSummary();
+        toast.error(error.message || '导入文件解析失败');
+    } finally {
+        if (elements.importFileInput) {
+            elements.importFileInput.value = '';
+        }
+    }
+}
+
+async function submitImportAccounts() {
+    if (isImportSubmitting) return;
+
+    const manualInput = (elements.importJson?.value || '').trim();
+    const overwrite = Boolean(elements.importOverwrite?.checked);
+    let accounts = pendingImportAccounts;
+
+    if (manualInput) {
+        try {
+            accounts = parseImportJsonText(manualInput, '已使用粘贴 JSON').accounts;
+        } catch (error) {
+            toast.error(error.message || 'JSON 解析失败');
+            return;
+        }
+    }
+
+    if (!Array.isArray(accounts) || accounts.length === 0) {
+        toast.warning('请先拖入文件或粘贴 JSON');
+        return;
+    }
+
+    isImportSubmitting = true;
+    const submitBtn = elements.submitImportBtn;
+    const originalText = submitBtn?.textContent || '开始导入';
+    if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.textContent = '导入中...';
+    }
+
+    try {
+        const result = await api.post('/accounts/import', {
+            accounts,
+            overwrite,
+        }, {
+            requestKey: 'accounts:import',
+            cancelPrevious: true,
+            retry: 0,
+            timeoutMs: 120000,
+        });
+
+        closeImportModal({ force: true });
+
+        const summary = `导入完成：新增 ${result?.created || 0}，更新 ${result?.updated || 0}，跳过 ${result?.skipped || 0}，失败 ${result?.failed || 0}`;
+        const failedCount = Number(result?.failed || 0);
+        if (failedCount > 0) {
+            const firstError = Array.isArray(result?.errors) && result.errors[0]
+                ? `；首个错误：${result.errors[0].email || '-'} ${result.errors[0].error || ''}`
+                : '';
+            toast.warning(summary + firstError, 6000);
+        } else {
+            toast.success(summary);
+        }
+        await refreshAccountsView({ settleDelayMs: 80 });
+    } catch (error) {
+        toast.error('导入失败: ' + error.message);
+    } finally {
+        isImportSubmitting = false;
+        if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.textContent = originalText;
+        }
     }
 }
 

@@ -18,7 +18,16 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func
 
-from ...config.constants import AccountStatus
+from ...config.constants import (
+    AccountStatus,
+    PoolState,
+    RoleTag,
+    account_label_to_role_tag,
+    normalize_account_label,
+    normalize_pool_state,
+    normalize_role_tag,
+    role_tag_to_account_label,
+)
 from ...config.settings import get_settings
 from ...core.openai.overview import fetch_codex_overview, AccountDeactivatedError
 from ...core.openai.token_refresh import refresh_account_token as do_refresh
@@ -209,6 +218,12 @@ class AccountImportItem(BaseModel):
     proxy_used: Optional[str] = None
     source: Optional[str] = "import"
     subscription_type: Optional[str] = None
+    account_label: Optional[str] = None
+    role_tag: Optional[str] = None
+    biz_tag: Optional[str] = None
+    pool_state: Optional[str] = None
+    pool_state_manual: Optional[str] = None
+    priority: Optional[int] = None
     plan_type: Optional[str] = None
     auth_mode: Optional[str] = None
     user_id: Optional[str] = None
@@ -218,6 +233,9 @@ class AccountImportItem(BaseModel):
     tokens: Optional[dict] = None
     quota: Optional[dict] = None
     tags: Optional[Any] = None
+    expires_at: Optional[Any] = None
+    registered_at: Optional[Any] = None
+    last_refresh: Optional[Any] = None
     created_at: Optional[Any] = None
     last_used: Optional[Any] = None
     metadata: Optional[dict] = None
@@ -553,6 +571,102 @@ def _pick_first_text(*values: Any) -> Optional[str]:
     return None
 
 
+def _parse_import_datetime(value: Any) -> Optional[datetime]:
+    if value is None or value == "":
+        return None
+
+    dt: Optional[datetime] = None
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, (int, float)) and not isinstance(value, bool):
+        timestamp = float(value)
+        if timestamp > 1_000_000_000_000:
+            timestamp /= 1000.0
+        dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        if re.fullmatch(r"\d{13}", text):
+            return _parse_import_datetime(int(text))
+        if re.fullmatch(r"\d{10}(?:\.\d+)?", text):
+            return _parse_import_datetime(float(text))
+        try:
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=None)
+    return dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _looks_like_sub2api_account_item(raw_item: Any) -> bool:
+    return isinstance(raw_item, dict) and isinstance(raw_item.get("credentials"), dict)
+
+
+def _normalize_sub2api_import_item(raw_item: Dict[str, Any]) -> Dict[str, Any]:
+    credentials = raw_item.get("credentials") if isinstance(raw_item.get("credentials"), dict) else {}
+    extra = raw_item.get("extra") if isinstance(raw_item.get("extra"), dict) else {}
+    existing_metadata = raw_item.get("metadata") if isinstance(raw_item.get("metadata"), dict) else {}
+
+    name_text = _pick_first_text(raw_item.get("name"))
+    email = _pick_first_text(raw_item.get("email"), credentials.get("email"), extra.get("email"))
+    if not email and name_text and "@" in name_text:
+        email = name_text
+
+    metadata: Dict[str, Any] = dict(existing_metadata)
+    metadata["import_format"] = "sub2api"
+
+    sub2api_meta: Dict[str, Any] = {}
+    for key in ("platform", "type", "concurrency", "rate_multiplier", "auto_pause_on_expired"):
+        value = raw_item.get(key)
+        if value is not None:
+            sub2api_meta[key] = value
+    if extra:
+        sub2api_meta["extra"] = extra
+    model_mapping = credentials.get("model_mapping")
+    if isinstance(model_mapping, dict) and model_mapping:
+        sub2api_meta["model_mapping"] = model_mapping
+    if sub2api_meta:
+        metadata["sub2api"] = sub2api_meta
+
+    normalized: Dict[str, Any] = {
+        "email": email,
+        "password": _pick_first_text(raw_item.get("password"), credentials.get("password")),
+        "email_service": _pick_first_text(raw_item.get("email_service"), "manual"),
+        "status": _pick_first_text(raw_item.get("status"), AccountStatus.ACTIVE.value),
+        "client_id": _pick_first_text(raw_item.get("client_id"), credentials.get("client_id")),
+        "account_id": _pick_first_text(raw_item.get("account_id"), credentials.get("chatgpt_account_id")),
+        "workspace_id": _pick_first_text(raw_item.get("workspace_id"), credentials.get("organization_id")),
+        "access_token": _pick_first_text(raw_item.get("access_token"), credentials.get("access_token")),
+        "refresh_token": _pick_first_text(raw_item.get("refresh_token"), credentials.get("refresh_token")),
+        "id_token": _pick_first_text(raw_item.get("id_token"), credentials.get("id_token")),
+        "session_token": _pick_first_text(raw_item.get("session_token"), credentials.get("session_token")),
+        "source": _pick_first_text(raw_item.get("source"), "sub2api_import"),
+        "priority": raw_item.get("priority"),
+        "plan_type": _pick_first_text(raw_item.get("plan_type"), credentials.get("plan_type")),
+        "auth_mode": _pick_first_text(raw_item.get("auth_mode"), raw_item.get("type")),
+        "user_id": _pick_first_text(raw_item.get("user_id"), credentials.get("chatgpt_user_id")),
+        "organization_id": _pick_first_text(raw_item.get("organization_id"), credentials.get("organization_id")),
+        "account_name": _pick_first_text(raw_item.get("account_name"), name_text),
+        "registered_at": raw_item.get("registered_at") if raw_item.get("registered_at") is not None else raw_item.get("created_at"),
+        "last_refresh": raw_item.get("last_refresh") if raw_item.get("last_refresh") is not None else extra.get("codex_usage_updated_at"),
+        "last_used": raw_item.get("last_used"),
+        "expires_at": raw_item.get("expires_at") if raw_item.get("expires_at") is not None else credentials.get("expires_at"),
+        "metadata": metadata,
+    }
+    return {key: value for key, value in normalized.items() if value is not None}
+
+
+def _normalize_import_raw_item(raw_item: Any) -> Any:
+    if _looks_like_sub2api_account_item(raw_item):
+        return _normalize_sub2api_import_item(raw_item)
+    return raw_item
+
+
 def _decode_jwt_payload_unverified(token: Optional[str]) -> Dict[str, Any]:
     """
     无签名校验解码 JWT payload，仅用于导入兜底字段提取。
@@ -740,7 +854,7 @@ async def create_manual_account(request: ManualAccountCreateRequest):
 async def import_accounts(request: ImportAccountsRequest):
     """
     一键导入账号（账号总览卡片使用）。
-    支持按账号详情字段导入；可选覆盖同邮箱已有账号。
+    支持按账号详情字段或 Sub2API 导出结构导入；可选覆盖同邮箱已有账号。
     """
     items = request.accounts or []
     if not items:
@@ -758,6 +872,7 @@ async def import_accounts(request: ImportAccountsRequest):
         "skipped": 0,
         "failed": 0,
         "errors": [],
+        "details": [],
     }
 
     def _safe_text(value: Optional[str]) -> Optional[str]:
@@ -766,24 +881,102 @@ async def import_accounts(request: ImportAccountsRequest):
         text = str(value).strip()
         return text if text else None
 
+    def _build_detail(index: int, raw_item: Any) -> Dict[str, Any]:
+        raw_email = "-"
+        if isinstance(raw_item, dict):
+            raw_email = str(
+                raw_item.get("email")
+                or raw_item.get("account_id")
+                or raw_item.get("workspace_id")
+                or "-"
+            ).strip() or "-"
+        return {
+            "index": index,
+            "email": raw_email,
+            "status": "pending",
+            "action": None,
+            "failed_stage": None,
+            "error": None,
+            "steps": [],
+        }
+
+    def _push_step(detail: Dict[str, Any], stage: str, message: str, level: str = "info") -> None:
+        detail["steps"].append(
+            {
+                "stage": stage,
+                "message": message,
+                "level": level,
+            }
+        )
+
+    logger.info("账号导入开始: total=%s overwrite=%s", len(items), request.overwrite)
+
     with get_db() as db:
         for index, raw_item in enumerate(items, start=1):
+            detail = _build_detail(index, raw_item)
+            result["details"].append(detail)
+            current_stage = "request_parse"
+            _push_step(detail, current_stage, "开始处理导入项")
+
             if not isinstance(raw_item, dict):
                 result["failed"] += 1
+                error_message = "导入项必须是 JSON 对象"
+                detail["status"] = "failed"
+                detail["failed_stage"] = current_stage
+                detail["error"] = error_message
+                _push_step(detail, current_stage, error_message, "error")
                 result["errors"].append(
-                    {"index": index, "email": "-", "error": "导入项必须是 JSON 对象"}
+                    {
+                        "index": index,
+                        "email": "-",
+                        "stage": current_stage,
+                        "error": error_message,
+                    }
+                )
+                logger.warning(
+                    "账号导入失败: index=%s stage=%s email=%s error=%s",
+                    index,
+                    current_stage,
+                    detail["email"],
+                    error_message,
                 )
                 continue
+
+            prepared_item = _normalize_import_raw_item(raw_item)
+            if prepared_item is not raw_item:
+                detail["email"] = str(prepared_item.get("email") or detail["email"]).strip() or detail["email"]
+                _push_step(detail, current_stage, "检测到 Sub2API 导出结构，已自动映射字段")
 
             try:
-                item = AccountImportItem.model_validate(raw_item)
+                current_stage = "payload_validate"
+                item = AccountImportItem.model_validate(prepared_item)
+                _push_step(detail, current_stage, "字段校验通过")
             except Exception as exc:
                 result["failed"] += 1
+                error_message = f"字段格式错误: {exc}"
+                detail["email"] = str(prepared_item.get("email") or raw_item.get("email") or "-")
+                detail["status"] = "failed"
+                detail["failed_stage"] = current_stage
+                detail["error"] = error_message
+                _push_step(detail, current_stage, error_message, "error")
                 result["errors"].append(
-                    {"index": index, "email": str(raw_item.get("email") or "-"), "error": f"字段格式错误: {exc}"}
+                    {
+                        "index": index,
+                        "email": str(prepared_item.get("email") or raw_item.get("email") or "-"),
+                        "stage": current_stage,
+                        "error": error_message,
+                    }
+                )
+                logger.warning(
+                    "账号导入失败: index=%s stage=%s email=%s error=%s",
+                    index,
+                    current_stage,
+                    detail["email"],
+                    error_message,
                 )
                 continue
 
+            current_stage = "token_parse"
             token_bundle = item.tokens if isinstance(item.tokens, dict) else {}
             access_token = _pick_first_text(item.access_token, token_bundle.get("access_token"), token_bundle.get("accessToken"))
             refresh_token = _pick_first_text(item.refresh_token, token_bundle.get("refresh_token"), token_bundle.get("refreshToken"))
@@ -807,12 +1000,12 @@ async def import_accounts(request: ImportAccountsRequest):
 
             account_id_value = _pick_first_text(
                 item.account_id,
-                raw_item.get("account_id"),
+                prepared_item.get("account_id"),
                 auth_claims.get("chatgpt_account_id"),
             )
             workspace_id_value = _pick_first_text(
                 item.workspace_id,
-                raw_item.get("workspace_id"),
+                prepared_item.get("workspace_id"),
                 account_id_value,
             )
 
@@ -823,12 +1016,46 @@ async def import_accounts(request: ImportAccountsRequest):
                     access_claims.get("client_id"),
                     id_aud_first,
                 )
+            _push_step(
+                detail,
+                current_stage,
+                "Token 解析完成"
+                f" (AT={'yes' if access_token else 'no'}, RT={'yes' if refresh_token else 'no'}, "
+                f"Session={'yes' if session_token else 'no'}, ClientID={'yes' if client_id else 'no'})",
+            )
 
+            current_stage = "normalize_fields"
             email = str(item.email or "").strip().lower()
+            detail["email"] = email or detail["email"]
             if not email or "@" not in email:
                 result["failed"] += 1
-                result["errors"].append({"index": index, "email": email or "-", "error": "邮箱格式不正确"})
+                error_message = "邮箱格式不正确"
+                detail["status"] = "failed"
+                detail["failed_stage"] = current_stage
+                detail["error"] = error_message
+                _push_step(detail, current_stage, error_message, "error")
+                result["errors"].append(
+                    {
+                        "index": index,
+                        "email": email or "-",
+                        "stage": current_stage,
+                        "error": error_message,
+                    }
+                )
+                logger.warning(
+                    "账号导入失败: index=%s stage=%s email=%s error=%s",
+                    index,
+                    current_stage,
+                    detail["email"],
+                    error_message,
+                )
                 continue
+            _push_step(
+                detail,
+                current_stage,
+                "字段归一化完成"
+                f" (email={email}, account_id={account_id_value or '-'}, workspace_id={workspace_id_value or '-'})",
+            )
 
             status = str(item.status or AccountStatus.ACTIVE.value).strip().lower()
             if status not in [e.value for e in AccountStatus]:
@@ -840,10 +1067,32 @@ async def import_accounts(request: ImportAccountsRequest):
                 _normalize_subscription_input(item.subscription_type)
                 or _normalize_subscription_input(item.plan_type)
                 or _normalize_subscription_input(_pick_first_text(
-                    raw_item.get("plan_type"),
+                    prepared_item.get("plan_type"),
                     auth_claims.get("chatgpt_plan_type"),
                 ))
             )
+            expires_at_value = _parse_import_datetime(
+                _pick_first_text(
+                    prepared_item.get("expires_at"),
+                    token_bundle.get("expires_at"),
+                    access_claims.get("exp"),
+                )
+            )
+            registered_at_value = _parse_import_datetime(
+                _pick_first_text(
+                    prepared_item.get("registered_at"),
+                    prepared_item.get("created_at"),
+                )
+            )
+            last_refresh_value = _parse_import_datetime(
+                _pick_first_text(
+                    prepared_item.get("last_refresh"),
+                    prepared_item.get("usage_updated_at"),
+                )
+            )
+            if not last_refresh_value and access_token:
+                last_refresh_value = utcnow_naive()
+            last_used_at_value = _parse_import_datetime(prepared_item.get("last_used"))
             metadata = dict(item.metadata) if isinstance(item.metadata, dict) else {}
             for extra_key in (
                 "id",
@@ -859,19 +1108,76 @@ async def import_accounts(request: ImportAccountsRequest):
                 "usage_updated_at",
                 "plan_type",
             ):
-                value = raw_item.get(extra_key)
+                value = prepared_item.get(extra_key)
                 if value is not None:
                     metadata[extra_key] = value
             if isinstance(token_bundle, dict) and token_bundle:
                 metadata["tokens_shape"] = list(token_bundle.keys())
 
-            exists = crud.get_account_by_email(db, email)
-            if exists and not request.overwrite:
-                result["skipped"] += 1
-                continue
+            role_tag_input = _pick_first_text(item.role_tag, prepared_item.get("role_tag"))
+            account_label_input = _pick_first_text(item.account_label, prepared_item.get("account_label"))
+            should_apply_role_fields = bool(role_tag_input or account_label_input)
+            resolved_role_tag = None
+            resolved_account_label = None
+            if should_apply_role_fields:
+                resolved_role_tag = normalize_role_tag(
+                    role_tag_input or account_label_to_role_tag(account_label_input)
+                )
+                resolved_account_label = normalize_account_label(
+                    account_label_input or role_tag_to_account_label(resolved_role_tag)
+                )
+
+            pool_state_input = _pick_first_text(item.pool_state, prepared_item.get("pool_state"))
+            pool_state_manual_input = _pick_first_text(item.pool_state_manual, prepared_item.get("pool_state_manual"))
+            should_apply_pool_state = bool(pool_state_input)
+            should_apply_pool_state_manual = bool(pool_state_manual_input)
+            resolved_pool_state = normalize_pool_state(pool_state_input) if should_apply_pool_state else None
+            resolved_pool_state_manual = (
+                normalize_pool_state(pool_state_manual_input) if should_apply_pool_state_manual else None
+            )
+
+            if source == "team_import" and subscription_type == "team":
+                if not should_apply_role_fields:
+                    should_apply_role_fields = True
+                    resolved_role_tag = RoleTag.PARENT.value
+                    resolved_account_label = role_tag_to_account_label(resolved_role_tag)
+                    _push_step(
+                        detail,
+                        current_stage,
+                        f"team_import 默认标签已补齐 (role_tag={resolved_role_tag}, account_label={resolved_account_label})",
+                    )
+                if not should_apply_pool_state_manual:
+                    should_apply_pool_state_manual = True
+                    resolved_pool_state_manual = PoolState.TEAM_POOL.value
+                    _push_step(
+                        detail,
+                        current_stage,
+                        f"team_import 默认入池状态已补齐 (pool_state_manual={resolved_pool_state_manual})",
+                    )
 
             try:
+                current_stage = "lookup_existing"
+                exists = crud.get_account_by_email(db, email)
+                if exists and not request.overwrite:
+                    result["skipped"] += 1
+                    detail["status"] = "skipped"
+                    detail["action"] = "skip_existing"
+                    _push_step(detail, current_stage, f"命中已有账号 id={exists.id}，overwrite=false，已跳过", "warn")
+                    logger.info(
+                        "账号导入跳过: index=%s email=%s account_id=%s overwrite=%s",
+                        index,
+                        email,
+                        exists.id,
+                        request.overwrite,
+                    )
+                    continue
+                if exists:
+                    _push_step(detail, current_stage, f"命中已有账号 id={exists.id}，准备更新")
+                else:
+                    _push_step(detail, current_stage, "未找到已有账号，准备创建新账号")
+
                 if exists and request.overwrite:
+                    current_stage = "update_account"
                     update_payload = {
                         "password": _safe_text(item.password),
                         "email_service": email_service,
@@ -887,7 +1193,16 @@ async def import_accounts(request: ImportAccountsRequest):
                         "proxy_used": _safe_text(item.proxy_used),
                         "source": source,
                         "extra_data": metadata,
-                        "last_refresh": utcnow_naive(),
+                        "registered_at": registered_at_value,
+                        "last_refresh": last_refresh_value,
+                        "expires_at": expires_at_value,
+                        "last_used_at": last_used_at_value,
+                        "account_label": _safe_text(resolved_account_label) if should_apply_role_fields else None,
+                        "role_tag": _safe_text(resolved_role_tag) if should_apply_role_fields else None,
+                        "biz_tag": _safe_text(item.biz_tag),
+                        "pool_state": _safe_text(resolved_pool_state) if should_apply_pool_state else None,
+                        "pool_state_manual": _safe_text(resolved_pool_state_manual) if should_apply_pool_state_manual else None,
+                        "priority": item.priority if item.priority is not None else None,
                     }
                     clean_update_payload = {k: v for k, v in update_payload.items() if v is not None}
                     account = crud.update_account(db, exists.id, **clean_update_payload)
@@ -897,8 +1212,21 @@ async def import_accounts(request: ImportAccountsRequest):
                     account.subscription_at = utcnow_naive() if subscription_type else None
                     db.commit()
                     result["updated"] += 1
+                    detail["status"] = "updated"
+                    detail["action"] = "update"
+                    _push_step(detail, current_stage, f"账号更新成功 id={account.id}")
+                    if subscription_type:
+                        _push_step(detail, "subscription_sync", f"订阅类型已同步为 {subscription_type}")
+                    logger.info(
+                        "账号导入成功: index=%s action=update email=%s account_id=%s subscription=%s",
+                        index,
+                        email,
+                        account.id,
+                        subscription_type or "-",
+                    )
                     continue
 
+                current_stage = "create_account"
                 account = crud.create_account(
                     db,
                     email=email,
@@ -916,16 +1244,66 @@ async def import_accounts(request: ImportAccountsRequest):
                     extra_data=metadata,
                     status=status,
                     source=source,
+                    registered_at=registered_at_value,
+                    last_refresh=last_refresh_value,
+                    expires_at=expires_at_value,
+                    account_label=_safe_text(resolved_account_label) if should_apply_role_fields else None,
+                    role_tag=_safe_text(resolved_role_tag) if should_apply_role_fields else None,
+                    biz_tag=_safe_text(item.biz_tag),
+                    pool_state=_safe_text(resolved_pool_state) if should_apply_pool_state else None,
+                    pool_state_manual=_safe_text(resolved_pool_state_manual) if should_apply_pool_state_manual else None,
+                    priority=item.priority if item.priority is not None else None,
+                    last_used_at=last_used_at_value,
                 )
                 if subscription_type:
                     account.subscription_type = subscription_type
                     account.subscription_at = utcnow_naive()
                     db.commit()
                 result["created"] += 1
+                detail["status"] = "created"
+                detail["action"] = "create"
+                _push_step(detail, current_stage, f"账号创建成功 id={account.id}")
+                if subscription_type:
+                    _push_step(detail, "subscription_sync", f"订阅类型已同步为 {subscription_type}")
+                logger.info(
+                    "账号导入成功: index=%s action=create email=%s account_id=%s subscription=%s",
+                    index,
+                    email,
+                    account.id,
+                    subscription_type or "-",
+                )
             except Exception as exc:
                 result["failed"] += 1
-                result["errors"].append({"index": index, "email": email, "error": str(exc)})
+                error_message = str(exc)
+                detail["status"] = "failed"
+                detail["failed_stage"] = current_stage
+                detail["error"] = error_message
+                _push_step(detail, current_stage, error_message, "error")
+                result["errors"].append(
+                    {
+                        "index": index,
+                        "email": email,
+                        "stage": current_stage,
+                        "error": error_message,
+                    }
+                )
+                logger.exception(
+                    "账号导入异常: index=%s stage=%s email=%s error=%s",
+                    index,
+                    current_stage,
+                    email,
+                    error_message,
+                )
 
+    logger.info(
+        "账号导入完成: total=%s created=%s updated=%s skipped=%s failed=%s overwrite=%s",
+        result["total"],
+        result["created"],
+        result["updated"],
+        result["skipped"],
+        result["failed"],
+        request.overwrite,
+    )
     return result
 
 

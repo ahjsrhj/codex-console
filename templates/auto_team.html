@@ -793,6 +793,33 @@
             font-family: var(--font-mono);
         }
 
+        .team-import-log-wrap {
+            margin-top: 16px;
+            border: 1px solid #dbe3ef;
+            border-radius: 14px;
+            background: #0f172a;
+            padding: 14px;
+        }
+
+        .team-import-log-title {
+            margin-bottom: 8px;
+            color: #cbd5e1;
+            font-size: 0.86rem;
+            font-weight: 700;
+        }
+
+        .team-import-log {
+            margin: 0;
+            max-height: 280px;
+            overflow: auto;
+            color: #e2e8f0;
+            white-space: pre-wrap;
+            word-break: break-word;
+            font-family: var(--font-mono);
+            font-size: 0.82rem;
+            line-height: 1.65;
+        }
+
         @media (max-width: 1100px) {
             .team-invite-layout {
                 grid-template-columns: 1fr;
@@ -1162,6 +1189,11 @@
                         <div class="team-import-hint">每条至少要有 email + access_token；可附带 refresh_token/session_token/client_id/account_id。</div>
                     </div>
                 </div>
+
+                <div class="team-import-log-wrap">
+                    <div class="team-import-log-title">导入日志</div>
+                    <pre id="teamImportLog" class="team-import-log">等待开始...</pre>
+                </div>
             </div>
             <div class="target-modal-footer">
                 <span id="teamImportModalHint" class="empty-tip" style="margin-right:auto;">-</span>
@@ -1176,7 +1208,6 @@
     {% include "partials/site_footer.html" %}
 </body>
 </html>
-
 
 
 
