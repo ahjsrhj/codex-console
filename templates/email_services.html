@@ -361,6 +361,11 @@
                             <label for="custom-lm-preferred-domain">优先域名 (可选)</label>
                             <input type="text" id="custom-lm-preferred-domain" name="lm_preferred_domain" placeholder="outlook.com">
                         </div>
+                        <div class="form-group">
+                            <label for="custom-lm-account-list">现有账号列表</label>
+                            <textarea id="custom-lm-account-list" name="lm_account_list" rows="6" placeholder="sunnyboyerbzgq@hotmail.com----tok_aed722eec46a4bf3609a254ea95ad0f8"></textarea>
+                            <small style="color: var(--text-muted);">每行一个账号，格式：邮箱----token</small>
+                        </div>
                     </div>
                     <!-- Freemail 字段 -->
                     <div id="add-freemail-fields" style="display:none;">
@@ -565,6 +570,11 @@
                             <label for="edit-lm-preferred-domain">优先域名 (可选)</label>
                             <input type="text" id="edit-lm-preferred-domain" name="lm_preferred_domain" placeholder="outlook.com">
                         </div>
+                        <div class="form-group">
+                            <label for="edit-lm-account-list">现有账号列表</label>
+                            <textarea id="edit-lm-account-list" name="lm_account_list" rows="6" placeholder="sunnyboyerbzgq@hotmail.com----tok_aed722eec46a4bf3609a254ea95ad0f8"></textarea>
+                            <small style="color: var(--text-muted);">每行一个账号，格式：邮箱----token</small>
+                        </div>
                     </div>
                     <!-- Freemail 字段 -->
                     <div id="edit-freemail-fields" style="display:none;">
@@ -687,4 +697,3 @@
     {% include "partials/site_footer.html" %}
 </body>
 </html>
-

@@ -97,6 +97,118 @@ SENSITIVE_FIELDS = {
     'admin_password',
     'custom_auth',
 }
+LUCKMAIL_ACCOUNT_SEPARATOR = "----"
+
+
+def _is_valid_email_address(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text or " " in text or text.count("@") != 1:
+        return False
+    local_part, domain = text.split("@", 1)
+    return bool(local_part and domain and "." in domain)
+
+
+def _normalize_luckmail_account_list(entries: Any) -> List[Dict[str, Any]]:
+    if not isinstance(entries, list):
+        return []
+
+    normalized: List[Dict[str, Any]] = []
+    seen_emails = set()
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+
+        email = str(item.get("email") or "").strip().lower()
+        token = str(item.get("token") or "").strip()
+        if not email or not token or email in seen_emails:
+            continue
+
+        seen_emails.add(email)
+        normalized.append({
+            "email": email,
+            "token": token,
+            "used": bool(item.get("used", False)),
+            "used_at": str(item.get("used_at") or "").strip() or None,
+            "last_result": str(item.get("last_result") or "").strip() or None,
+            "last_task_uuid": str(item.get("last_task_uuid") or "").strip() or None,
+        })
+
+    return normalized
+
+
+def _serialize_luckmail_account_list_text(entries: Any) -> str:
+    account_list = _normalize_luckmail_account_list(entries)
+    return "\n".join(
+        f"{item['email']}{LUCKMAIL_ACCOUNT_SEPARATOR}{item['token']}"
+        for item in account_list
+    )
+
+
+def _parse_luckmail_account_list_text(
+    raw_text: Any,
+    existing_entries: Any = None,
+) -> List[Dict[str, Any]]:
+    text = str(raw_text or "")
+    if not text.strip():
+        return []
+
+    existing_by_identity = {
+        (item["email"], item["token"]): item
+        for item in _normalize_luckmail_account_list(existing_entries)
+    }
+
+    parsed: List[Dict[str, Any]] = []
+    seen_emails = set()
+    for line_no, raw_line in enumerate(text.splitlines(), start=1):
+        line = str(raw_line or "").strip()
+        if not line:
+            continue
+
+        parts = [part.strip() for part in line.split(LUCKMAIL_ACCOUNT_SEPARATOR)]
+        if len(parts) != 2 or not parts[0] or not parts[1]:
+            raise ValueError(f"现有账号列表第 {line_no} 行格式错误，应为 邮箱----token")
+
+        email = parts[0].lower()
+        token = parts[1]
+        if not _is_valid_email_address(email):
+            raise ValueError(f"现有账号列表第 {line_no} 行邮箱格式错误: {parts[0]}")
+        if email in seen_emails:
+            raise ValueError(f"现有账号列表第 {line_no} 行邮箱重复: {email}")
+
+        seen_emails.add(email)
+        existing = existing_by_identity.get((email, token), {})
+        parsed.append({
+            "email": email,
+            "token": token,
+            "used": bool(existing.get("used", False)),
+            "used_at": str(existing.get("used_at") or "").strip() or None,
+            "last_result": str(existing.get("last_result") or "").strip() or None,
+            "last_task_uuid": str(existing.get("last_task_uuid") or "").strip() or None,
+        })
+
+    return parsed
+
+
+def _strip_empty_config_values(config: Dict[str, Any]) -> Dict[str, Any]:
+    stripped: Dict[str, Any] = {}
+    for key, value in (config or {}).items():
+        if str(key).startswith("_"):
+            continue
+        if key == "account_list":
+            stripped[key] = _normalize_luckmail_account_list(value)
+            continue
+        if value is None:
+            continue
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                continue
+            stripped[key] = value
+            continue
+        if isinstance(value, (list, dict)) and not value:
+            continue
+        stripped[key] = value
+    return stripped
 
 def normalize_email_service_config(service_type: str, config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """兼容历史配置字段，避免不同入口写入的键名不一致。"""
@@ -109,7 +221,52 @@ def normalize_email_service_config(service_type: str, config: Optional[Dict[str,
     if service_type == "cloudmail" and normalized.get("api_key") and not normalized.get("admin_password"):
         normalized["admin_password"] = normalized.pop("api_key")
 
+    if service_type == "luckmail" and normalized.get("domain") and not normalized.get("preferred_domain"):
+        normalized["preferred_domain"] = normalized.pop("domain")
+
     return normalized
+
+
+def prepare_email_service_config(
+    service_type: str,
+    config: Optional[Dict[str, Any]],
+    existing_config: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    normalized = normalize_email_service_config(service_type, config)
+
+    if service_type == "luckmail":
+        existing_normalized = normalize_email_service_config(service_type, existing_config)
+        existing_accounts = _normalize_luckmail_account_list(existing_normalized.get("account_list"))
+
+        if "account_list_text" in normalized:
+            normalized["account_list"] = _parse_luckmail_account_list_text(
+                normalized.pop("account_list_text"),
+                existing_entries=existing_accounts,
+            )
+        elif "account_list" in normalized:
+            normalized["account_list"] = _normalize_luckmail_account_list(normalized.get("account_list"))
+        else:
+            normalized["account_list"] = existing_accounts
+
+    return _strip_empty_config_values(normalized)
+
+
+def build_email_service_full_config(service_type: str, config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    full_config = normalize_email_service_config(service_type, config)
+    full_config = dict(full_config)
+    full_config.pop("_service_record_id", None)
+
+    if service_type == "luckmail":
+        account_list = _normalize_luckmail_account_list(full_config.get("account_list"))
+        if not account_list and full_config.get("account_list_text"):
+            try:
+                account_list = _parse_luckmail_account_list_text(full_config.get("account_list_text"))
+            except ValueError:
+                account_list = []
+        full_config["account_list"] = account_list
+        full_config["account_list_text"] = _serialize_luckmail_account_list_text(account_list)
+
+    return full_config
 
 
 def filter_sensitive_config(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -119,6 +276,16 @@ def filter_sensitive_config(config: Dict[str, Any]) -> Dict[str, Any]:
 
     filtered = {}
     for key, value in config.items():
+        if str(key).startswith("_"):
+            continue
+        if key == "account_list":
+            account_list = _normalize_luckmail_account_list(value)
+            filtered["has_account_list"] = bool(account_list)
+            filtered["account_list_total"] = len(account_list)
+            filtered["account_list_unused"] = sum(1 for item in account_list if not item.get("used"))
+            continue
+        if key == "account_list_text":
+            continue
         if key in SENSITIVE_FIELDS:
             # 敏感字段不返回，但标记是否存在
             filtered[f"has_{key}"] = bool(value)
@@ -347,6 +514,7 @@ async def get_service_types():
                     {"name": "project_code", "label": "项目编码", "required": False, "default": "openai"},
                     {"name": "email_type", "label": "邮箱类型", "required": False, "default": "ms_graph"},
                     {"name": "preferred_domain", "label": "优先域名", "required": False, "placeholder": "outlook.com"},
+                    {"name": "account_list_text", "label": "现有账号列表", "required": False, "placeholder": "email@example.com----tok_xxx"},
                     {"name": "poll_interval", "label": "轮询间隔(秒)", "required": False, "default": 3.0},
                 ]
             }
@@ -401,7 +569,7 @@ async def get_email_service_full(service_id: int):
             "name": service.name,
             "enabled": service.enabled,
             "priority": service.priority,
-            "config": normalize_email_service_config(service.service_type, service.config),  # 返回完整配置
+            "config": build_email_service_full_config(service.service_type, service.config),  # 返回完整配置
             "last_used": service.last_used.isoformat() if service.last_used else None,
             "created_at": service.created_at.isoformat() if service.created_at else None,
             "updated_at": service.updated_at.isoformat() if service.updated_at else None,
@@ -423,10 +591,15 @@ async def create_email_service(request: EmailServiceCreate):
         if existing:
             raise HTTPException(status_code=400, detail="服务名称已存在")
 
+        try:
+            prepared_config = prepare_email_service_config(request.service_type, request.config)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
         service = EmailServiceModel(
             service_type=request.service_type,
             name=request.name,
-            config=normalize_email_service_config(request.service_type, request.config),
+            config=prepared_config,
             enabled=request.enabled,
             priority=request.priority
         )
@@ -452,9 +625,14 @@ async def update_email_service(service_id: int, request: EmailServiceUpdate):
             # 合并配置而不是替换
             current_config = normalize_email_service_config(service.service_type, service.config)
             merged_config = {**current_config, **request.config}
-            # 移除空值
-            merged_config = {k: v for k, v in merged_config.items() if v}
-            update_data["config"] = normalize_email_service_config(service.service_type, merged_config)
+            try:
+                update_data["config"] = prepare_email_service_config(
+                    service.service_type,
+                    merged_config,
+                    existing_config=current_config,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
         if request.enabled is not None:
             update_data["enabled"] = request.enabled
         if request.priority is not None:

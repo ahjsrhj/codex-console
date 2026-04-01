@@ -18,6 +18,7 @@ from ..config.constants import OTP_CODE_PATTERN
 
 logger = logging.getLogger(__name__)
 _STATE_LOCK = threading.RLock()
+_CUSTOM_ACCOUNT_RESERVATIONS: Dict[str, Dict[str, Any]] = {}
 # 申诉硬编码开关（临时）：False=关闭申诉提交；True=开启申诉提交。
 LUCKMAIL_APPEAL_ENABLED = False
 
@@ -93,6 +94,8 @@ class LuckMailService(BaseEmailService):
         self.config["purchase_scan_page_size"] = max(int(self.config.get("purchase_scan_page_size") or 100), 1)
         self.config["poll_interval"] = float(self.config.get("poll_interval") or 3.0)
         self.config["code_reuse_ttl"] = int(self.config.get("code_reuse_ttl") or 600)
+        self._service_record_id = str(self.config.get("_service_record_id") or "").strip()
+        self.config["account_list"] = self._normalize_custom_account_list(self.config.get("account_list"))
 
         if not self.config["api_key"]:
             raise ValueError("LuckMail 配置缺少 api_key")
@@ -196,6 +199,195 @@ class LuckMailService(BaseEmailService):
 
     def _normalize_email(self, email: Optional[str]) -> str:
         return str(email or "").strip().lower()
+
+    def _normalize_custom_account_list(self, raw_entries: Any) -> List[Dict[str, Any]]:
+        if not isinstance(raw_entries, list):
+            return []
+
+        normalized: List[Dict[str, Any]] = []
+        seen_emails = set()
+        for item in raw_entries:
+            if not isinstance(item, dict):
+                continue
+
+            email = self._normalize_email(item.get("email"))
+            token = str(item.get("token") or "").strip()
+            if not email or not token or email in seen_emails:
+                continue
+
+            seen_emails.add(email)
+            normalized.append({
+                "email": email,
+                "token": token,
+                "used": bool(item.get("used", False)),
+                "used_at": str(item.get("used_at") or "").strip() or None,
+                "last_result": str(item.get("last_result") or "").strip() or None,
+                "last_task_uuid": str(item.get("last_task_uuid") or "").strip() or None,
+            })
+
+        return normalized
+
+    def _custom_account_scope(self) -> str:
+        return self._service_record_id or f"{self.config.get('base_url')}::{self.name}"
+
+    def _custom_account_reservation_key(self, email: str) -> str:
+        return f"{self._custom_account_scope()}::{self._normalize_email(email)}"
+
+    def _cleanup_custom_account_reservations(self, max_age: int = 1800) -> None:
+        now_ts = time.time()
+        stale_keys = [
+            key for key, meta in _CUSTOM_ACCOUNT_RESERVATIONS.items()
+            if (now_ts - float(meta.get("reserved_at") or 0.0)) > max_age
+        ]
+        for key in stale_keys:
+            _CUSTOM_ACCOUNT_RESERVATIONS.pop(key, None)
+
+    def _reserve_custom_account(self, email: str, token: str) -> bool:
+        reservation_key = self._custom_account_reservation_key(email)
+        with _STATE_LOCK:
+            self._cleanup_custom_account_reservations()
+            if reservation_key in _CUSTOM_ACCOUNT_RESERVATIONS:
+                return False
+            _CUSTOM_ACCOUNT_RESERVATIONS[reservation_key] = {
+                "email": self._normalize_email(email),
+                "token": str(token or "").strip(),
+                "reserved_at": time.time(),
+            }
+            return True
+
+    def _release_custom_account(self, email: str) -> None:
+        if not email:
+            return
+        with _STATE_LOCK:
+            _CUSTOM_ACCOUNT_RESERVATIONS.pop(self._custom_account_reservation_key(email), None)
+
+    def _find_custom_account_entry(self, email: str, token: str = "") -> Optional[Dict[str, Any]]:
+        email_norm = self._normalize_email(email)
+        token_text = str(token or "").strip()
+        for item in self._normalize_custom_account_list(self.config.get("account_list")):
+            if item["email"] != email_norm:
+                continue
+            if token_text and item["token"] != token_text:
+                continue
+            return item
+        if token_text:
+            for item in self._normalize_custom_account_list(self.config.get("account_list")):
+                if item["email"] == email_norm:
+                    return item
+        return None
+
+    def _pick_custom_account_inbox(self) -> Optional[Dict[str, Any]]:
+        account_list = self._normalize_custom_account_list(self.config.get("account_list"))
+        self.config["account_list"] = account_list
+
+        for item in account_list:
+            if item.get("used"):
+                continue
+            if not self._reserve_custom_account(item["email"], item["token"]):
+                continue
+            return {
+                "id": item["token"],
+                "service_id": item["token"],
+                "order_no": "",
+                "email": item["email"],
+                "token": item["token"],
+                "purchase_id": None,
+                "inbox_mode": "purchase",
+                "project_code": self.config.get("project_code"),
+                "email_type": self.config.get("email_type"),
+                "preferred_domain": self.config.get("preferred_domain"),
+                "expired_at": "",
+                "created_at": time.time(),
+                "source": "custom_account_pool",
+            }
+        return None
+
+    def _mark_custom_account_used_in_list(
+        self,
+        account_list: List[Dict[str, Any]],
+        email: str,
+        token: str,
+        success: bool,
+        reason: str,
+        task_uuid: str,
+    ) -> bool:
+        email_norm = self._normalize_email(email)
+        token_text = str(token or "").strip()
+        last_result = "success" if success else (str(reason or "").strip() or "failed")
+        used_at = self._now_iso()
+
+        def _apply(match_token: bool) -> bool:
+            for item in account_list:
+                if item.get("email") != email_norm:
+                    continue
+                if match_token and token_text and str(item.get("token") or "").strip() != token_text:
+                    continue
+                item["used"] = True
+                item["used_at"] = used_at
+                item["last_result"] = last_result
+                item["last_task_uuid"] = task_uuid or None
+                return True
+            return False
+
+        if _apply(match_token=True):
+            return True
+        return _apply(match_token=False)
+
+    def _mark_custom_account_used(
+        self,
+        email: str,
+        success: bool,
+        reason: str = "",
+        context: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        context = dict(context or {})
+        token = str(context.get("token") or context.get("service_id") or "").strip()
+        task_uuid = str(context.get("task_uuid") or "").strip()
+
+        current_account_list = self._normalize_custom_account_list(self.config.get("account_list"))
+        updated_in_memory = self._mark_custom_account_used_in_list(
+            current_account_list,
+            email=email,
+            token=token,
+            success=success,
+            reason=reason,
+            task_uuid=task_uuid,
+        )
+        if updated_in_memory:
+            self.config["account_list"] = current_account_list
+
+        persisted = False
+        service_record_id = int(self._service_record_id) if self._service_record_id.isdigit() else None
+        if service_record_id is not None:
+            try:
+                from ..database.models import EmailService as EmailServiceModel
+                from ..database.session import get_db
+
+                with get_db() as db:
+                    db_service = db.query(EmailServiceModel).filter(
+                        EmailServiceModel.id == service_record_id
+                    ).first()
+                    if db_service:
+                        latest_config = dict(db_service.config or {})
+                        latest_account_list = self._normalize_custom_account_list(latest_config.get("account_list"))
+                        if self._mark_custom_account_used_in_list(
+                            latest_account_list,
+                            email=email,
+                            token=token,
+                            success=success,
+                            reason=reason,
+                            task_uuid=task_uuid,
+                        ):
+                            latest_config["account_list"] = latest_account_list
+                            latest_config.pop("_service_record_id", None)
+                            db_service.config = latest_config
+                            db.commit()
+                            persisted = True
+            except Exception as exc:
+                logger.warning(f"LuckMail 回写自定义账号池使用状态失败: {exc}")
+
+        self._release_custom_account(email)
+        return updated_in_memory or persisted
 
     def _is_resumable_failure_reason(self, reason: str) -> bool:
         text = str(reason or "").strip().lower()
@@ -398,11 +590,22 @@ class LuckMailService(BaseEmailService):
         context: Optional[Dict[str, Any]] = None,
     ) -> None:
         """供任务调度层调用：把注册结果落盘，避免后续重复尝试同邮箱。"""
+        context = dict(context or {})
+        source = str(context.get("source") or "").strip().lower()
+        token = str(context.get("token") or context.get("service_id") or "").strip()
+        if source == "custom_account_pool" or self._find_custom_account_entry(email, token):
+            self._mark_custom_account_used(
+                email=email,
+                success=success,
+                reason=reason,
+                context=context,
+            )
+
         if success:
             self._mark_registered_email(email, extra=context)
         else:
             prefer_failed = self._should_force_failed_record(reason)
-            context_copy = dict(context or {})
+            context_copy = dict(context)
             password = str(context_copy.get("generated_password") or context_copy.get("password") or "").strip()
             if password:
                 context_copy["password"] = password
@@ -844,6 +1047,12 @@ class LuckMailService(BaseEmailService):
 
     def create_email(self, config: Dict[str, Any] = None) -> Dict[str, Any]:
         request_config = config or {}
+        custom_account_info = self._pick_custom_account_inbox()
+        if custom_account_info:
+            self._cache_order(custom_account_info)
+            self.update_status(True)
+            return custom_account_info
+
         project_code = str(request_config.get("project_code") or self.config["project_code"]).strip()
         email_type = str(request_config.get("email_type") or self.config["email_type"]).strip()
         preferred_domain = str(
@@ -1038,6 +1247,7 @@ class LuckMailService(BaseEmailService):
             return False
 
     def get_service_info(self) -> Dict[str, Any]:
+        account_list = self._normalize_custom_account_list(self.config.get("account_list"))
         return {
             "service_type": self.service_type.value,
             "name": self.name,
@@ -1046,6 +1256,8 @@ class LuckMailService(BaseEmailService):
             "email_type": self.config.get("email_type"),
             "preferred_domain": self.config.get("preferred_domain"),
             "inbox_mode": self.config.get("inbox_mode"),
+            "account_list_total": len(account_list),
+            "account_list_unused": sum(1 for item in account_list if not item.get("used")),
             "cached_orders": len(self._orders_by_no),
             "status": self.status.value,
         }

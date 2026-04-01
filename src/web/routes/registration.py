@@ -345,6 +345,11 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
 
     这个函数会被 run_in_executor 调用，运行在独立线程中
     """
+    engine = None
+    email_service = None
+    marker = None
+    marker_context: Dict[str, Any] = {"task_uuid": task_uuid}
+    marker_called = False
     with get_db() as db:
         try:
             # 检查是否已取消
@@ -395,6 +400,8 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
                 if db_service:
                     service_type = EmailServiceType(db_service.service_type)
                     config = _normalize_email_service_config(service_type, db_service.config, actual_proxy_url)
+                    if service_type == EmailServiceType.LUCKMAIL:
+                        config["_service_record_id"] = db_service.id
                     # 更新任务关联的邮箱服务
                     crud.update_registration_task(db, task_uuid, email_service_id=db_service.id)
                     logger.info(f"使用数据库邮箱服务: {db_service.name} (ID: {db_service.id}, 类型: {service_type.value})")
@@ -562,6 +569,7 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
 
                     if db_service and db_service.config:
                         config = _normalize_email_service_config(service_type, db_service.config, actual_proxy_url)
+                        config["_service_record_id"] = db_service.id
                         crud.update_registration_task(db, task_uuid, email_service_id=db_service.id)
                         logger.info(f"使用数据库 LuckMail 服务: {db_service.name}")
                     else:
@@ -588,7 +596,7 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
             account_label = role_tag_to_account_label(role_tag)
             result = engine.run()
             marker = getattr(email_service, "mark_registration_outcome", None)
-            marker_context = {}
+            marker_context = {"task_uuid": task_uuid}
             try:
                 info = getattr(engine, "email_info", None) or {}
                 for key in ("service_id", "order_no", "token", "purchase_id", "source"):
@@ -596,7 +604,7 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
                     if value not in (None, ""):
                         marker_context[key] = value
             except Exception:
-                marker_context = {}
+                marker_context = {"task_uuid": task_uuid}
 
             if result.success:
                 # 更新代理使用时间
@@ -618,6 +626,7 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
                             success=True,
                             context=marker_context,
                         )
+                        marker_called = True
                     except Exception as mark_err:
                         logger.warning(f"记录邮箱成功状态失败: {mark_err}")
 
@@ -754,6 +763,7 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
                             reason=result.error_message or "",
                             context=marker_context,
                         )
+                        marker_called = True
                     except Exception as mark_err:
                         logger.warning(f"记录邮箱失败状态失败: {mark_err}")
 
@@ -774,6 +784,18 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
             logger.error(f"注册任务异常: {task_uuid}, 错误: {e}")
 
             try:
+                failed_email = str(getattr(engine, "email", "") or "").strip()
+                if callable(marker) and failed_email and not marker_called:
+                    try:
+                        marker(
+                            email=failed_email,
+                            success=False,
+                            reason=str(e),
+                            context=marker_context or {"task_uuid": task_uuid},
+                        )
+                    except Exception as mark_err:
+                        logger.warning(f"记录异常邮箱失败状态失败: {mark_err}")
+
                 with get_db() as db:
                     crud.update_registration_task(
                         db, task_uuid,
@@ -2320,4 +2342,3 @@ async def delete_scheduled_registration_job(job_uuid: str):
             raise HTTPException(status_code=400, detail="无法删除执行中的计划任务")
         crud.delete_scheduled_registration_job(db, job_uuid)
         return {'success': True, 'message': '计划任务已删除'}
-
