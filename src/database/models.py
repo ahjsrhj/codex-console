@@ -364,6 +364,21 @@ class NewApiService(Base):
     updated_at = Column(DateTime, default=utcnow_naive, onupdate=utcnow_naive)
 
 
+class Codex2ApiService(Base):
+    """Codex2Api 服务配置表"""
+    __tablename__ = 'codex2api_services'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(100), nullable=False)
+    api_url = Column(String(500), nullable=False)
+    admin_key = Column(Text, nullable=False)
+    proxy_url = Column(String(1000))
+    enabled = Column(Boolean, default=True)
+    priority = Column(Integer, default=0)
+    created_at = Column(DateTime, default=utcnow_naive)
+    updated_at = Column(DateTime, default=utcnow_naive, onupdate=utcnow_naive)
+
+
 class ScheduledRegistrationJob(Base):
     """计划注册任务表"""
     __tablename__ = 'scheduled_registration_jobs'

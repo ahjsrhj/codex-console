@@ -415,6 +415,7 @@
                                 <a href="#" class="dropdown-item" id="batch-upload-cpa-item">☁️ 上传到 CPA</a>
                                 <a href="#" class="dropdown-item" id="batch-upload-sub2api-item">🔗 上传到 Sub2API</a>
                                 <a href="#" class="dropdown-item" id="batch-upload-tm-item">🚀 上传到 Team Manager</a>
+                                <a href="#" class="dropdown-item" id="batch-upload-codex2api-item">🤖 上传到 Codex2Api</a>
                                 <a href="#" class="dropdown-item" id="batch-upload-new-api-item">🆕 上传到 new-api</a>
                             </div>
                         </div>
@@ -601,6 +602,26 @@
         </div>
     </div>
 
+    <!-- Codex2Api 服务选择模态框 -->
+    <div class="modal" id="codex2api-service-modal">
+        <div class="modal-content" style="max-width: 480px;">
+            <div class="modal-header">
+                <h3>🤖 选择 Codex2Api 服务</h3>
+                <button class="modal-close" id="close-codex2api-modal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p style="color: var(--text-muted); margin-bottom: 12px; font-size: 0.9rem;">选择要上传到的 Codex2Api 服务，或自动选择第一个启用的服务。</p>
+                <div id="codex2api-service-list" style="display: flex; flex-direction: column; gap: 8px; max-height: 300px; overflow-y: auto;">
+                    <div style="text-align: center; color: var(--text-muted);">加载中...</div>
+                </div>
+            </div>
+            <div class="modal-footer" style="padding: 12px 20px; border-top: 1px solid var(--border); display: flex; gap: 8px; justify-content: flex-end;">
+                <button class="btn btn-secondary" id="codex2api-use-auto-btn">自动选择</button>
+                <button class="btn btn-secondary" id="cancel-codex2api-modal-btn">取消</button>
+            </div>
+        </div>
+    </div>
+
     <!-- 自动一键刷新设置 -->
     <div class="modal" id="auto-quick-refresh-modal">
         <div class="modal-content" style="max-width: 560px;">
@@ -661,6 +682,5 @@
     {% include "partials/site_footer.html" %}
 </body>
 </html>
-
 
 

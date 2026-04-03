@@ -129,6 +129,9 @@ const elements = {
     autoUploadNewApi: document.getElementById('auto-upload-new-api'),
     newApiServiceSelectGroup: document.getElementById('new-api-service-select-group'),
     newApiServiceSelect: document.getElementById('new-api-service-select'),
+    autoUploadCodex2Api: document.getElementById('auto-upload-codex2api'),
+    codex2ApiServiceSelectGroup: document.getElementById('codex2api-service-select-group'),
+    codex2ApiServiceSelect: document.getElementById('codex2api-service-select'),
     scheduleForm: document.getElementById('schedule-form'),
     scheduleName: document.getElementById('schedule-name'),
     scheduleTriggerType: document.getElementById('schedule-trigger-type'),
@@ -177,13 +180,14 @@ document.addEventListener('DOMContentLoaded', () => {
     loadScheduledJobs();
 });
 
-// 初始化注册后自动操作选项（CPA / Sub2API / TM / new-api）
+// 初始化注册后自动操作选项（CPA / Sub2API / TM / new-api / Codex2Api）
 async function initAutoUploadOptions() {
     await Promise.all([
         loadServiceSelect('/cpa-services?enabled=true', elements.cpaServiceSelect, elements.autoUploadCpa, elements.cpaServiceSelectGroup),
         loadServiceSelect('/sub2api-services?enabled=true', elements.sub2apiServiceSelect, elements.autoUploadSub2api, elements.sub2apiServiceSelectGroup),
         loadServiceSelect('/tm-services?enabled=true', elements.tmServiceSelect, elements.autoUploadTm, elements.tmServiceSelectGroup),
         loadServiceSelect('/new-api-services?enabled=true', elements.newApiServiceSelect, elements.autoUploadNewApi, elements.newApiServiceSelectGroup),
+        loadServiceSelect('/codex2api-services?enabled=true', elements.codex2ApiServiceSelect, elements.autoUploadCodex2Api, elements.codex2ApiServiceSelectGroup),
     ]);
 }
 
@@ -684,6 +688,8 @@ function buildCurrentRegistrationConfig() {
         tm_service_ids: elements.autoUploadTm && elements.autoUploadTm.checked ? getSelectedServiceIds(elements.tmServiceSelect) : [],
         auto_upload_new_api: elements.autoUploadNewApi ? elements.autoUploadNewApi.checked : false,
         new_api_service_ids: elements.autoUploadNewApi && elements.autoUploadNewApi.checked ? getSelectedServiceIds(elements.newApiServiceSelect) : [],
+        auto_upload_codex2api: elements.autoUploadCodex2Api ? elements.autoUploadCodex2Api.checked : false,
+        codex2api_service_ids: elements.autoUploadCodex2Api && elements.autoUploadCodex2Api.checked ? getSelectedServiceIds(elements.codex2ApiServiceSelect) : [],
     };
 
     if (isOutlookBatchMode) {
@@ -819,11 +825,18 @@ function setRegistrationConfigToForm(config) {
     if (elements.newApiServiceSelectGroup && elements.autoUploadNewApi) {
         elements.newApiServiceSelectGroup.style.display = elements.autoUploadNewApi.checked ? 'block' : 'none';
     }
+    if (elements.autoUploadCodex2Api) {
+        elements.autoUploadCodex2Api.checked = !!registrationConfig.auto_upload_codex2api;
+    }
+    if (elements.codex2ApiServiceSelectGroup && elements.autoUploadCodex2Api) {
+        elements.codex2ApiServiceSelectGroup.style.display = elements.autoUploadCodex2Api.checked ? 'block' : 'none';
+    }
 
     setSelectedServiceIds(elements.cpaServiceSelect, registrationConfig.cpa_service_ids || []);
     setSelectedServiceIds(elements.sub2apiServiceSelect, registrationConfig.sub2api_service_ids || []);
     setSelectedServiceIds(elements.tmServiceSelect, registrationConfig.tm_service_ids || []);
     setSelectedServiceIds(elements.newApiServiceSelect, registrationConfig.new_api_service_ids || []);
+    setSelectedServiceIds(elements.codex2ApiServiceSelect, registrationConfig.codex2api_service_ids || []);
 
     if (emailServiceType === 'outlook_batch') {
         isOutlookBatchMode = true;
@@ -2175,6 +2188,8 @@ async function handleOutlookBatchRegistration() {
         tm_service_ids: elements.autoUploadTm && elements.autoUploadTm.checked ? getSelectedServiceIds(elements.tmServiceSelect) : [],
         auto_upload_new_api: elements.autoUploadNewApi ? elements.autoUploadNewApi.checked : false,
         new_api_service_ids: elements.autoUploadNewApi && elements.autoUploadNewApi.checked ? getSelectedServiceIds(elements.newApiServiceSelect) : [],
+        auto_upload_codex2api: elements.autoUploadCodex2Api ? elements.autoUploadCodex2Api.checked : false,
+        codex2api_service_ids: elements.autoUploadCodex2Api && elements.autoUploadCodex2Api.checked ? getSelectedServiceIds(elements.codex2ApiServiceSelect) : [],
     };
 
     addLog('info', `[系统] 正在启动 Outlook 批量注册 (${selectedIds.length} 个账户)...`);

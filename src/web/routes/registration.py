@@ -114,6 +114,8 @@ class RegistrationTaskCreate(BaseModel):
     tm_service_ids: List[int] = []
     auto_upload_new_api: bool = False
     new_api_service_ids: List[int] = []
+    auto_upload_codex2api: bool = False
+    codex2api_service_ids: List[int] = []
     registration_type: str = RoleTag.CHILD.value
 
 
@@ -136,6 +138,8 @@ class BatchRegistrationRequest(BaseModel):
     tm_service_ids: List[int] = []
     auto_upload_new_api: bool = False
     new_api_service_ids: List[int] = []
+    auto_upload_codex2api: bool = False
+    codex2api_service_ids: List[int] = []
     registration_type: str = RoleTag.CHILD.value
 
 
@@ -206,6 +210,8 @@ class OutlookBatchRegistrationRequest(BaseModel):
     tm_service_ids: List[int] = []
     auto_upload_new_api: bool = False
     new_api_service_ids: List[int] = []
+    auto_upload_codex2api: bool = False
+    codex2api_service_ids: List[int] = []
     registration_type: str = RoleTag.CHILD.value
 
 
@@ -343,7 +349,7 @@ def _normalize_email_service_config(
     return normalized
 
 
-def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: Optional[str], email_service_config: Optional[dict], email_service_id: Optional[int] = None, log_prefix: str = "", batch_id: str = "", auto_upload_cpa: bool = False, cpa_service_ids: List[int] = None, auto_upload_sub2api: bool = False, sub2api_service_ids: List[int] = None, auto_upload_tm: bool = False, tm_service_ids: List[int] = None, auto_upload_new_api: bool = False, new_api_service_ids: List[int] = None, registration_type: str = RoleTag.CHILD.value):
+def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: Optional[str], email_service_config: Optional[dict], email_service_id: Optional[int] = None, log_prefix: str = "", batch_id: str = "", auto_upload_cpa: bool = False, cpa_service_ids: List[int] = None, auto_upload_sub2api: bool = False, sub2api_service_ids: List[int] = None, auto_upload_tm: bool = False, tm_service_ids: List[int] = None, auto_upload_codex2api: bool = False, codex2api_service_ids: List[int] = None, auto_upload_new_api: bool = False, new_api_service_ids: List[int] = None, registration_type: str = RoleTag.CHILD.value):
     """
     在线程池中执行的同步注册任务
 
@@ -774,6 +780,37 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
                     except Exception as new_api_err:
                         log_callback(f"[NewAPI] 上传异常: {new_api_err}")
 
+                if auto_upload_codex2api:
+                    _raise_if_cancelled("任务在 Codex2Api 上传前收到取消请求，停止后处理")
+                    try:
+                        from ...core.upload.codex2api_upload import upload_to_codex2api
+                        from ...database.models import Account as AccountModel
+                        saved_account = db.query(AccountModel).filter_by(email=result.email).first()
+                        if saved_account and (saved_account.refresh_token or saved_account.access_token):
+                            _codex2api_ids = codex2api_service_ids or []
+                            if not _codex2api_ids:
+                                _codex2api_ids = [s.id for s in crud.get_codex2api_services(db, enabled=True)]
+                            if not _codex2api_ids:
+                                log_callback("[Codex2Api] 无可用 Codex2Api 服务，跳过上传")
+                            for _sid in _codex2api_ids:
+                                _raise_if_cancelled("任务在 Codex2Api 上传过程中收到取消请求")
+                                try:
+                                    _svc = crud.get_codex2api_service_by_id(db, _sid)
+                                    if not _svc:
+                                        continue
+                                    log_callback(f"[Codex2Api] 正在把账号发往服务站: {_svc.name}")
+                                    _ok, _msg = upload_to_codex2api(
+                                        saved_account,
+                                        _svc.api_url,
+                                        _svc.admin_key,
+                                        getattr(_svc, "proxy_url", None),
+                                    )
+                                    log_callback(f"[Codex2Api] {'成功' if _ok else '失败'}({_svc.name}): {_msg}")
+                                except Exception as _e:
+                                    log_callback(f"[Codex2Api] 异常({_sid}): {_e}")
+                    except Exception as codex2api_err:
+                        log_callback(f"[Codex2Api] 上传异常: {codex2api_err}")
+
                 # 更新任务状态
                 _raise_if_cancelled("任务在收尾前收到取消请求，停止标记成功")
                 crud.update_registration_task(
@@ -848,7 +885,7 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
                 pass
 
 
-async def run_registration_task(task_uuid: str, email_service_type: str, proxy: Optional[str], email_service_config: Optional[dict], email_service_id: Optional[int] = None, log_prefix: str = "", batch_id: str = "", auto_upload_cpa: bool = False, cpa_service_ids: List[int] = None, auto_upload_sub2api: bool = False, sub2api_service_ids: List[int] = None, auto_upload_tm: bool = False, tm_service_ids: List[int] = None, auto_upload_new_api: bool = False, new_api_service_ids: List[int] = None, registration_type: str = RoleTag.CHILD.value):
+async def run_registration_task(task_uuid: str, email_service_type: str, proxy: Optional[str], email_service_config: Optional[dict], email_service_id: Optional[int] = None, log_prefix: str = "", batch_id: str = "", auto_upload_cpa: bool = False, cpa_service_ids: List[int] = None, auto_upload_sub2api: bool = False, sub2api_service_ids: List[int] = None, auto_upload_tm: bool = False, tm_service_ids: List[int] = None, auto_upload_codex2api: bool = False, codex2api_service_ids: List[int] = None, auto_upload_new_api: bool = False, new_api_service_ids: List[int] = None, registration_type: str = RoleTag.CHILD.value):
     """
     异步执行注册任务
 
@@ -881,6 +918,8 @@ async def run_registration_task(task_uuid: str, email_service_type: str, proxy: 
             sub2api_service_ids or [],
             auto_upload_tm,
             tm_service_ids or [],
+            auto_upload_codex2api,
+            codex2api_service_ids or [],
             auto_upload_new_api,
             new_api_service_ids or [],
             registration_type,
@@ -936,6 +975,8 @@ async def run_batch_parallel(
     sub2api_service_ids: List[int] = None,
     auto_upload_tm: bool = False,
     tm_service_ids: List[int] = None,
+    auto_upload_codex2api: bool = False,
+    codex2api_service_ids: List[int] = None,
     auto_upload_new_api: bool = False,
     new_api_service_ids: List[int] = None,
     registration_type: str = RoleTag.CHILD.value,
@@ -971,6 +1012,7 @@ async def run_batch_parallel(
                 auto_upload_sub2api=auto_upload_sub2api, sub2api_service_ids=sub2api_service_ids or [],
                 auto_upload_tm=auto_upload_tm, tm_service_ids=tm_service_ids or [],
                 auto_upload_new_api=auto_upload_new_api, new_api_service_ids=new_api_service_ids or [],
+                auto_upload_codex2api=auto_upload_codex2api, codex2api_service_ids=codex2api_service_ids or [],
                 registration_type=registration_type,
             )
         with get_db() as db:
@@ -1019,6 +1061,8 @@ async def run_batch_pipeline(
     sub2api_service_ids: List[int] = None,
     auto_upload_tm: bool = False,
     tm_service_ids: List[int] = None,
+    auto_upload_codex2api: bool = False,
+    codex2api_service_ids: List[int] = None,
     auto_upload_new_api: bool = False,
     new_api_service_ids: List[int] = None,
     registration_type: str = RoleTag.CHILD.value,
@@ -1054,6 +1098,7 @@ async def run_batch_pipeline(
                 auto_upload_sub2api=auto_upload_sub2api, sub2api_service_ids=sub2api_service_ids or [],
                 auto_upload_tm=auto_upload_tm, tm_service_ids=tm_service_ids or [],
                 auto_upload_new_api=auto_upload_new_api, new_api_service_ids=new_api_service_ids or [],
+                auto_upload_codex2api=auto_upload_codex2api, codex2api_service_ids=codex2api_service_ids or [],
                 registration_type=registration_type,
             )
             with get_db() as db:
@@ -1126,6 +1171,8 @@ async def run_batch_registration(
     sub2api_service_ids: List[int] = None,
     auto_upload_tm: bool = False,
     tm_service_ids: List[int] = None,
+    auto_upload_codex2api: bool = False,
+    codex2api_service_ids: List[int] = None,
     auto_upload_new_api: bool = False,
     new_api_service_ids: List[int] = None,
     registration_type: str = RoleTag.CHILD.value,
@@ -1139,6 +1186,7 @@ async def run_batch_registration(
             auto_upload_sub2api=auto_upload_sub2api, sub2api_service_ids=sub2api_service_ids,
             auto_upload_tm=auto_upload_tm, tm_service_ids=tm_service_ids,
             auto_upload_new_api=auto_upload_new_api, new_api_service_ids=new_api_service_ids,
+            auto_upload_codex2api=auto_upload_codex2api, codex2api_service_ids=codex2api_service_ids,
             registration_type=registration_type,
         )
     else:
@@ -1150,6 +1198,7 @@ async def run_batch_registration(
             auto_upload_sub2api=auto_upload_sub2api, sub2api_service_ids=sub2api_service_ids,
             auto_upload_tm=auto_upload_tm, tm_service_ids=tm_service_ids,
             auto_upload_new_api=auto_upload_new_api, new_api_service_ids=new_api_service_ids,
+            auto_upload_codex2api=auto_upload_codex2api, codex2api_service_ids=codex2api_service_ids,
             registration_type=registration_type,
         )
 
@@ -1219,6 +1268,8 @@ async def run_auto_registration_batch(plan, settings: Settings) -> str:
         tm_service_ids=[],
         auto_upload_new_api=False,
         new_api_service_ids=[],
+        auto_upload_codex2api=False,
+        codex2api_service_ids=[],
     )
 
     batch = batch_tasks.get(batch_id)
@@ -1317,6 +1368,8 @@ async def _start_single_registration_internal(
         request.sub2api_service_ids,
         request.auto_upload_tm,
         request.tm_service_ids,
+        request.auto_upload_codex2api,
+        request.codex2api_service_ids,
         request.auto_upload_new_api,
         request.new_api_service_ids,
         request.registration_type,
@@ -1378,6 +1431,8 @@ async def _start_batch_registration_internal(
         request.sub2api_service_ids,
         request.auto_upload_tm,
         request.tm_service_ids,
+        request.auto_upload_codex2api,
+        request.codex2api_service_ids,
         request.auto_upload_new_api,
         request.new_api_service_ids,
         request.registration_type,
@@ -1471,6 +1526,8 @@ async def _start_outlook_batch_registration_internal(
         request.sub2api_service_ids,
         request.auto_upload_tm,
         request.tm_service_ids,
+        request.auto_upload_codex2api,
+        request.codex2api_service_ids,
         request.auto_upload_new_api,
         request.new_api_service_ids,
         request.registration_type,
@@ -1513,6 +1570,8 @@ async def dispatch_registration_config(
             tm_service_ids=config.get('tm_service_ids') or [],
             auto_upload_new_api=bool(config.get('auto_upload_new_api', False)),
             new_api_service_ids=config.get('new_api_service_ids') or [],
+            auto_upload_codex2api=bool(config.get('auto_upload_codex2api', False)),
+            codex2api_service_ids=config.get('codex2api_service_ids') or [],
         )
         response = await _start_outlook_batch_registration_internal(request, background_tasks)
         return {
@@ -1542,6 +1601,8 @@ async def dispatch_registration_config(
             tm_service_ids=config.get('tm_service_ids') or [],
             auto_upload_new_api=bool(config.get('auto_upload_new_api', False)),
             new_api_service_ids=config.get('new_api_service_ids') or [],
+            auto_upload_codex2api=bool(config.get('auto_upload_codex2api', False)),
+            codex2api_service_ids=config.get('codex2api_service_ids') or [],
         )
         response = await _start_batch_registration_internal(request, background_tasks)
         return {
@@ -1563,6 +1624,8 @@ async def dispatch_registration_config(
         tm_service_ids=config.get('tm_service_ids') or [],
         auto_upload_new_api=bool(config.get('auto_upload_new_api', False)),
         new_api_service_ids=config.get('new_api_service_ids') or [],
+        auto_upload_codex2api=bool(config.get('auto_upload_codex2api', False)),
+        codex2api_service_ids=config.get('codex2api_service_ids') or [],
     )
     response = await _start_single_registration_internal(request, background_tasks)
     return {
@@ -2132,6 +2195,8 @@ async def run_outlook_batch_registration(
     sub2api_service_ids: List[int] = None,
     auto_upload_tm: bool = False,
     tm_service_ids: List[int] = None,
+    auto_upload_codex2api: bool = False,
+    codex2api_service_ids: List[int] = None,
     auto_upload_new_api: bool = False,
     new_api_service_ids: List[int] = None,
 ):
@@ -2179,6 +2244,8 @@ async def run_outlook_batch_registration(
         tm_service_ids=tm_service_ids,
         auto_upload_new_api=auto_upload_new_api,
         new_api_service_ids=new_api_service_ids,
+        auto_upload_codex2api=auto_upload_codex2api,
+        codex2api_service_ids=codex2api_service_ids,
     )
 
 

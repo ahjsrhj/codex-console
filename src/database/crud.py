@@ -26,6 +26,7 @@ from .models import (
     Sub2ApiService,
     TeamManagerService,
     NewApiService,
+    Codex2ApiService,
     ScheduledRegistrationJob,
     BindCardTask,
     TeamInviteRecord,
@@ -947,6 +948,77 @@ def update_new_api_service(
 def delete_new_api_service(db: Session, service_id: int) -> bool:
     """鍒犻櫎 new-api 鏈嶅姟閰嶇疆"""
     svc = get_new_api_service_by_id(db, service_id)
+    if not svc:
+        return False
+    db.delete(svc)
+    db.commit()
+    return True
+
+
+# ============================================================================
+# Codex2Api 服务 CRUD
+# ============================================================================
+
+def create_codex2api_service(
+    db: Session,
+    name: str,
+    api_url: str,
+    admin_key: str,
+    proxy_url: Optional[str] = None,
+    enabled: bool = True,
+    priority: int = 0,
+) -> Codex2ApiService:
+    """创建 Codex2Api 服务配置"""
+    svc = Codex2ApiService(
+        name=name,
+        api_url=api_url,
+        admin_key=admin_key,
+        proxy_url=proxy_url,
+        enabled=enabled,
+        priority=priority,
+    )
+    db.add(svc)
+    db.commit()
+    db.refresh(svc)
+    return svc
+
+
+def get_codex2api_service_by_id(db: Session, service_id: int) -> Optional[Codex2ApiService]:
+    """按 ID 获取 Codex2Api 服务"""
+    return db.query(Codex2ApiService).filter(Codex2ApiService.id == service_id).first()
+
+
+def get_codex2api_services(
+    db: Session,
+    enabled: Optional[bool] = None,
+) -> List[Codex2ApiService]:
+    """获取 Codex2Api 服务列表"""
+    query = db.query(Codex2ApiService)
+    if enabled is not None:
+        query = query.filter(Codex2ApiService.enabled == enabled)
+    return query.order_by(asc(Codex2ApiService.priority), asc(Codex2ApiService.id)).all()
+
+
+def update_codex2api_service(
+    db: Session,
+    service_id: int,
+    **kwargs,
+) -> Optional[Codex2ApiService]:
+    """更新 Codex2Api 服务配置"""
+    svc = get_codex2api_service_by_id(db, service_id)
+    if not svc:
+        return None
+    for key, value in kwargs.items():
+        if hasattr(svc, key):
+            setattr(svc, key, value)
+    db.commit()
+    db.refresh(svc)
+    return svc
+
+
+def delete_codex2api_service(db: Session, service_id: int) -> bool:
+    """删除 Codex2Api 服务配置"""
+    svc = get_codex2api_service_by_id(db, service_id)
     if not svc:
         return False
     db.delete(svc)

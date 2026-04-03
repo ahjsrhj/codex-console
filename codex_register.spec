@@ -101,6 +101,7 @@ a = Analysis(
         'src.core.openai.oauth',
         'src.core.openai.token_refresh',
         'src.core.upload.cpa_upload',
+        'src.core.upload.codex2api_upload',
         'src.core.upload.sub2api_upload',
         'src.core.upload.team_manager_upload',
         'src.web.routes.accounts',
